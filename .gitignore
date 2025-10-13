@@ -1,0 +1,115 @@
+# Build outputs
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+
+# Visual Studio / Rider cache and user-specific files
+.vs/
+.vscode/
+.idea/
+*.rsuser
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.vcxproj.user
+
+# Build results
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.obj
+*.iobj
+*.pch
+*.ipch
+*.exp
+*.lib
+*.idb
+*.ipdb
+*.pgc
+*.pgd
+*.rsp
+*.sbr
+*.tlb
+*.tli
+*.tlh
+*.tmp
+*.tmp_proj
+*.log
+*.tlog
+*.vspscc
+*.vssscc
+.builds
+*.pidb
+*.svclog
+*.scc
+
+# Rider specific
+.idea/
+*.sln.iml
+
+# ReSharper
+_ReSharper*/
+*.[Rr]e[Ss]harper
+*.DotSettings.user
+
+# Visual Studio profiler
+*.psess
+*.vsp
+*.vspx
+*.sap
+
+# NuGet
+packages/
+*.nupkg
+*.snupkg
+
+# CMake (if you ever switch)
+CMakeFiles/
+CMakeCache.txt
+cmake-build-*/
+
+# OS specific
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Backup files
+*.bak
+*.orig
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+
+# IntelliSense database
+*.VC.db
+*.VC.VC.opendb
+
+# Visual Studio Code
+.vscode/
+*.code-workspace
+
+# Prerequisites
+*.d
+
+# Crash dumps
+*.stackdump
+*.dmp
