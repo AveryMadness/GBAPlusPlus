@@ -1,6 +1,10 @@
 ﻿#pragma once
 #include <cstdint>
 
+#define STACK_POINTER 13
+#define LINK_REGISTER 14
+#define PROGRAM_COUNTER 15
+
 /*Mode bits. These indicate the current processor mode:
 
 10000 - User mode

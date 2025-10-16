@@ -1,8 +1,10 @@
+#include <chrono>
 #include <iostream>
 #include <SDL3/SDL.h>
 #include <fstream>
 
 #include "Windows.h"
+#include "AGB/ARM7TDMI.h"
 
 #include "AGB/MemoryBus.h"
 #include "UI/MemoryViewerWindow.h"
@@ -28,6 +30,10 @@ std::string fileDialog(LPCSTR fileType) {
     }
     return "";
 }
+
+static constexpr int CYCLES_PER_FRAME = 280896;
+static constexpr double TARGET_FPS = 59.73;
+static constexpr double FRAME_TIME = 1.0 / TARGET_FPS;
 
 int main(int argc, char* argv[])
 {
@@ -116,11 +122,24 @@ int main(int argc, char* argv[])
 
     memoryBus->loadROM(romData, romSize);
 
+    ARM7TDMI* cpu = new ARM7TDMI(memoryBus, registers);
+    cpu->InitializeCpuForExecution();
+
     bool running = true;
     SDL_Event event;
 
+    using clock = std::chrono::high_resolution_clock;
+    auto lastTime = clock::now();
+    double accumulator = 0.0;
+
     while (running)
     {
+        auto currentTime = clock::now();
+        double deltaTime = std::chrono::duration<double>(currentTime - lastTime).count();
+        lastTime = currentTime;
+            
+        accumulator += deltaTime;
+        
         while (SDL_PollEvent(&event))
         {
             registerWindow.handleEvents(event);
@@ -134,13 +153,21 @@ int main(int argc, char* argv[])
             }
         }
 
+        while (accumulator >= FRAME_TIME) {
+            for (int i = 0; i < CYCLES_PER_FRAME; i++) {
+                cpu->runCpuStep();
+            }
+                
+            accumulator -= FRAME_TIME;
+        }
+
         if (registerWindow.isWindowOpen())
             registerWindow.updateText(), registerWindow.render();
 
         if (memViewer.isWindowOpen())
             memViewer.render();
 
-        SDL_Delay(16);
+        SDL_Delay(1);
     }
 
     // Only destroy the main dummy window here
