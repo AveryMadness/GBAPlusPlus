@@ -36,6 +36,9 @@ private:
 
     //helper read and write functions
     uint32_t Read32();
+
+    uint32_t LoadWord(uint32_t address);
+    void StoreWord(uint32_t address, uint32_t value);
     
     //typedef for calling instruction function
     typedef void (ARM7TDMI::*Instruction)(uint32_t);
@@ -58,6 +61,19 @@ private:
     bool isFlushed = false;
 
     void flushPipeline();
+
+
+    bool IsValueNegative(uint32_t Value);
+    bool IsValueZero(uint32_t Value);
+
+    bool IsCarryAddition(uint32_t Value1, uint32_t Value2);
+    bool IsCarrySubtraction(uint32_t Value1, uint32_t Value2);
+    bool IsCarryFromShifter(uint32_t operand2, uint8_t shiftType, uint8_t shiftAmount);
+
+    bool IsOverflowAddition(uint32_t Value1, uint32_t Value2);
+    bool IsOverflowSubtraction(uint32_t Value1, uint32_t Value2);
+
+    uint32_t ApplyShift(uint32_t value, uint8_t shiftType, uint8_t shiftAmount, bool& outCarry);
 
     //arm instruction handlers
     void armDataProcessing(uint32_t instruction);

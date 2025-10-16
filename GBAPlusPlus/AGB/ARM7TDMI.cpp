@@ -1,5 +1,6 @@
 ﻿#include "ARM7TDMI.h"
 
+#include <iostream>
 #include <Windows.h>
 
 ARM7TDMI::ARM7TDMI(MemoryBus* memoryBus, ARMRegisters* registers)
@@ -23,8 +24,13 @@ void ARM7TDMI::executeARMInstruction(uint32_t instruction)
 
 void ARM7TDMI::runCpuStep()
 {
-    //execute instruction ready to be executed
-    executeARMInstruction(ExecutingInstruction);
+    ConditionCode condition = static_cast<ConditionCode>((ExecutingInstruction >> 28) & 0xF);
+
+    if (checkCondition(condition))
+    {
+        //execute instruction ready to be executed
+        executeARMInstruction(ExecutingInstruction);
+    }
 
     //dont move up instructions after flushing pipeline.
     if (isFlushed)
@@ -50,6 +56,25 @@ uint32_t ARM7TDMI::Read32()
     *registers->GetRegister(PROGRAM_COUNTER) += 4;
 
     return value;
+}
+
+uint32_t ARM7TDMI::LoadWord(uint32_t address)
+{
+    uint32_t word = memoryBus->read32(address & ~0x3);
+    uint8_t alignment = address & 0x3;
+    uint32_t rotateAmount = alignment * 8;
+
+    return (word >> rotateAmount) | (word << (32 - rotateAmount));
+}
+
+void ARM7TDMI::StoreWord(uint32_t address, uint32_t value)
+{
+    uint8_t alignment = address & 0x3;
+    uint32_t rotateAmount = alignment * 8;
+
+    uint32_t rotatedValue = (value << rotateAmount) | (value >> (32 - rotateAmount));
+
+    memoryBus->write32(address & ~0x3, rotatedValue);
 }
 
 void ARM7TDMI::buildArmTable()
@@ -217,9 +242,289 @@ void ARM7TDMI::flushPipeline()
     }
 }
 
+bool ARM7TDMI::IsValueNegative(uint32_t Value)
+{
+    if (Value & 0x80000000) return true;
+    return false;
+}
+
+bool ARM7TDMI::IsValueZero(uint32_t Value)
+{
+    return Value == 0;
+}
+
+bool ARM7TDMI::IsCarryAddition(uint32_t Value1, uint32_t Value2)
+{
+    uint32_t result = Value1 + Value2;
+    return (result < Value1) || (result > Value2); 
+}
+
+bool ARM7TDMI::IsCarrySubtraction(uint32_t Value1, uint32_t Value2)
+{
+    return (Value1 >= Value2);
+}
+
+bool ARM7TDMI::IsOverflowAddition(uint32_t Value1, uint32_t Value2)
+{
+    uint32_t result = Value1 + Value2;
+
+    return ((Value1 ^ result) & (Value2 ^ result) & 0x80000000) != 0;
+}
+
+bool ARM7TDMI::IsOverflowSubtraction(uint32_t Value1, uint32_t Value2)
+{
+    uint32_t result = Value1 - Value2;
+    return ((Value1 ^ Value2) & (Value1 ^ result) & 0x80000000) != 0;
+}
+
+uint32_t ARM7TDMI::ApplyShift(uint32_t value, uint8_t shiftType, uint8_t shiftAmount, bool& outCarry)
+{
+    outCarry = false;
+    
+    switch (shiftType) {
+    case 0: // LSL
+        if (shiftAmount == 0) {
+            outCarry = false;
+        } else if (shiftAmount < 32) {
+            outCarry = (value >> (32 - shiftAmount)) & 1;
+            value = value << shiftAmount;
+        } else if (shiftAmount == 32) {
+            outCarry = value & 1;
+            value = 0;
+        } else {
+            outCarry = false;
+            value = 0;
+        }
+        break;
+    case 1: // LSR
+        if (shiftAmount == 0) {
+            outCarry = false;
+        } else if (shiftAmount < 32) {
+            outCarry = (value >> (shiftAmount - 1)) & 1;
+            value = value >> shiftAmount;
+        } else if (shiftAmount == 32) {
+            outCarry = (value >> 31) & 1;
+            value = 0;
+        } else {
+            outCarry = false;
+            value = 0;
+        }
+        break;
+    case 2: // ASR
+        if (shiftAmount == 0) {
+            outCarry = false;
+        } else if (shiftAmount < 32) {
+            outCarry = (value >> (shiftAmount - 1)) & 1;
+            value = (int32_t)value >> shiftAmount;
+        } else {
+            outCarry = (value >> 31) & 1;
+            value = (value & 0x80000000) ? 0xFFFFFFFF : 0;
+        }
+        break;
+    case 3: // ROR
+        if (shiftAmount == 0) {
+            outCarry = false;
+        } else {
+            shiftAmount %= 32;
+            outCarry = (value >> (shiftAmount - 1)) & 1;
+            value = (value >> shiftAmount) | (value << (32 - shiftAmount));
+        }
+        break;
+    }
+    
+    return value;
+}
+
+bool ARM7TDMI::IsCarryFromShifter(uint32_t operand2, uint8_t shiftType, uint8_t shiftAmount)
+{
+    // If no shift occurred, carry flag is unchanged
+    if (shiftAmount == 0 && shiftType != 3) {  // ROR with 0 is special
+        return registers->GetProgramStatusRegister().GetCarry();
+    }
+    
+    switch (shiftType) {
+    case 0: // LSL
+        if (shiftAmount == 0) return registers->GetProgramStatusRegister().GetCarry();
+        return (operand2 >> (32 - shiftAmount)) & 1;
+        
+    case 1: // LSR
+        if (shiftAmount == 0) return (operand2 >> 31) & 1;
+        return (operand2 >> (shiftAmount - 1)) & 1;
+        
+    case 2: // ASR
+        if (shiftAmount == 0) return (operand2 >> 31) & 1;
+        return (operand2 >> (shiftAmount - 1)) & 1;
+        
+    case 3: // ROR
+        if (shiftAmount == 0) {
+            // ROR #0 is actually RRX (rotate right with extend)
+            return (registers->GetProgramStatusRegister().GetCarry()) ? 1 : 0;
+        }
+        return (operand2 >> (shiftAmount - 1)) & 1;
+    }
+}
+
 void ARM7TDMI::armDataProcessing(uint32_t instruction)
 {
+    bool isImmediate = (instruction >> 25) & 0x1;
+    bool setConditionCodes = (instruction >> 20) & 0x1;
     
+    uint8_t opCode = (instruction >> 21) & 0xF;
+
+    uint8_t Operand1Register = (instruction >> 16) & 0xF;
+    uint8_t DestinationRegister = (instruction >> 12) & 0xF;
+
+    uint32_t Operand2Val = instruction & 0x7FF;
+
+    uint32_t Operand2 = Operand2Val;
+
+    bool shiftCarry = registers->GetProgramStatusRegister().GetCarry();
+
+    if (isImmediate)
+    {
+        uint8_t imm = instruction & 0xFF;
+        uint8_t rotate = (instruction >> 8) & 0xF;
+
+        uint32_t shiftAmount = rotate * 2;
+
+        if (shiftAmount == 0)
+        {
+            shiftCarry = false;
+        }
+        else
+        {
+            shiftCarry = (imm >> (shiftAmount - 1)) & 1;
+        }
+        
+        Operand2 = (imm >> shiftAmount) | (imm << (32 - shiftAmount));
+    }
+    else
+    {
+        uint8_t rm = instruction & 0xF;
+        uint8_t shiftType = (instruction >> 5) & 3;
+        bool shiftImmFlag = (instruction >> 4) & 1;
+
+        uint32_t value = *registers->GetRegister(rm);
+
+        uint8_t shiftAmount = 0;
+
+        if (shiftImmFlag)
+        {
+            shiftAmount = (instruction >> 7) & 0x1F;
+        }
+        else
+        {
+            uint8_t rs = (instruction >> 8) & 0xF;
+            shiftAmount = *registers->GetRegister(rs) & 0xFF;
+        }
+
+        value = ApplyShift(value, shiftType, shiftAmount, shiftCarry);
+
+        Operand2 = value;
+    }
+
+    uint32_t Operand1 = *registers->GetRegister(Operand1Register);
+
+    switch (opCode)
+    {
+    case 0b0000:
+        //AND
+        {
+            return;
+        }
+    case 0b0001:
+        //EOR
+        {
+            return;
+        }
+    case 0b0010:
+        //SUB
+        {
+            return;
+        }
+    case 0b0011:
+        //RSB
+        {
+            return;
+        }
+    case 0b0100:
+        //ADD
+        {
+            return;
+        }
+    case 0b0101:
+        //ADC
+        {
+            return;
+        }
+    case 0b0110:
+        //SBC
+        {
+            return;
+        }
+    case 0b0111:
+        //RSC
+        {
+            return;
+        }
+    case 0b1000:
+        //TST
+        {
+            return;
+        }
+    case 0b1001:
+        //TEQ
+        {
+            uint32_t result = Operand1 ^ Operand2;
+            registers->GetProgramStatusRegister().SetZero(IsValueZero(result));
+            registers->GetProgramStatusRegister().SetNegative(IsValueNegative(result));
+            registers->GetProgramStatusRegister().SetCarry(shiftCarry);
+            return;
+        }
+    case 0b1010:
+        //CMP
+        {
+            uint32_t result = Operand1 - Operand2;
+            registers->GetProgramStatusRegister().SetZero(IsValueZero(result));
+            registers->GetProgramStatusRegister().SetNegative(IsValueNegative(result));
+            registers->GetProgramStatusRegister().SetCarry(IsCarrySubtraction(Operand1, Operand2));
+            registers->GetProgramStatusRegister().SetOverflow(IsOverflowSubtraction(Operand1, Operand2));
+            
+            return;
+        }
+    case 0b1011:
+        //CMN
+        {
+            return;
+        }
+    case 0b1100:
+        //ORR
+        {
+            return;
+        }
+    case 0b1101:
+        //MOV
+        {
+            *registers->GetRegister(DestinationRegister) = Operand2;
+            if (setConditionCodes)
+            {
+                registers->GetProgramStatusRegister().SetZero(IsValueZero(Operand2));
+                registers->GetProgramStatusRegister().SetNegative(IsValueNegative(Operand2));
+                registers->GetProgramStatusRegister().SetCarry(shiftCarry);
+            }
+            return;
+        }
+    case 0b1110:
+        //BIC
+        {
+            return;
+        }
+    case 0b1111:
+        //MVN
+        {
+            return;
+        }
+    }
 }
 
 void ARM7TDMI::armMultiply(uint32_t instruction)
@@ -242,8 +547,72 @@ void ARM7TDMI::armHalfwordDataTransfer(uint32_t instruction)
 {
 }
 
+//LDR/STR
 void ARM7TDMI::armSingleDataTransfer(uint32_t instruction)
 {
+    bool loadMemory = (instruction >> 20) & 0x1;
+    bool writeBack = (instruction >> 21) & 0x1;
+    bool byteWord = (instruction >> 22) & 0x1;
+    bool upDown = (instruction >> 23) & 0x1;
+    bool prePostIndex = (instruction >> 24) & 0x1;
+    bool registerValue = (instruction >> 25) & 0x1;
+
+    uint8_t baseRegister = (instruction >> 16) & 0xF;
+    uint8_t destinationRegister = (instruction >> 12) & 0xF;
+
+    uint32_t offsetOp = instruction & 0xFFF;
+
+    //handles immediate
+    uint32_t offset = offsetOp;
+
+    bool shiftCarry;
+    if (registerValue)
+    {
+        uint8_t rm = instruction & 0xF;
+        uint8_t shiftType = (instruction >> 5) & 3;
+        uint8_t shiftAmount = (instruction >> 7) & 0x1F;
+
+        uint32_t value = *registers->GetRegister(rm);
+
+        offset = ApplyShift(value, shiftType, shiftAmount, shiftCarry);
+    }
+
+    if (!upDown) offset *= -1;
+
+    //LDR
+    uint32_t address = *registers->GetRegister(baseRegister) + (prePostIndex ? offset : 0);
+    if (loadMemory)
+    {
+        if (!byteWord)
+        {
+            uint32_t word = LoadWord(address);
+            
+            *registers->GetRegister(destinationRegister) = word;
+        }
+        else
+        {
+            uint8_t byte = memoryBus->read8(address);
+            
+            *registers->GetRegister(destinationRegister) = (uint32_t)byte;
+        }
+    }
+    //STR
+    else
+    {
+        if (!byteWord)
+        {
+            StoreWord(address, *registers->GetRegister(destinationRegister));
+        }
+        else
+        {
+            memoryBus->write8(address, (uint8_t)*registers->GetRegister(destinationRegister));
+        }
+    }
+
+    if (writeBack)
+    {
+        *registers->GetRegister(baseRegister) = address;
+    }
 }
 
 void ARM7TDMI::armBlockDataTransfer(uint32_t instruction)

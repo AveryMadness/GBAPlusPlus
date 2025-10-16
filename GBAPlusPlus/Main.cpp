@@ -34,6 +34,7 @@ std::string fileDialog(LPCSTR fileType) {
 static constexpr int CYCLES_PER_FRAME = 280896;
 static constexpr double TARGET_FPS = 59.73;
 static constexpr double FRAME_TIME = 1.0 / TARGET_FPS;
+static constexpr bool USE_FRAMERATE_CONTROL = false;  // Set to true to enable framerate, false for manual stepping
 
 int main(int argc, char* argv[])
 {
@@ -70,7 +71,7 @@ int main(int argc, char* argv[])
     MemoryViewerWindow memViewer("Memory Viewer", 100, 100, 1000, 600);
     memViewer.setMemoryBus(memoryBus);
 
-    const std::string biosFilename = fileDialog("BIOS File (.bin)\0*.bin");
+    const std::string biosFilename = R"(C:\Users\Avery\Desktop\GBAEmu\x64\Debug\Assets\gba_bios.bin)";//fileDialog("BIOS File (.bin)\0*.bin");
 
     std::ifstream file(biosFilename, std::ios::binary | std::ios::ate);
 
@@ -96,7 +97,8 @@ int main(int argc, char* argv[])
 
     memoryBus->loadBIOS(biosData, size);
 
-    const std::string romName = fileDialog("GBA ROM File (.gba)\0*.gba");
+    const std::string romName =
+        R"(C:\Users\Avery\Downloads\Pokemon - Emerald Version (USA, Europe)\Pokemon - Emerald Version (USA, Europe).gba)";//fileDialog("GBA ROM File (.gba)\0*.gba");
 
     std::ifstream romFile(biosFilename, std::ios::binary | std::ios::ate);
 
@@ -127,10 +129,15 @@ int main(int argc, char* argv[])
 
     bool running = true;
     SDL_Event event;
+    bool stepPressed = false;
 
     using clock = std::chrono::high_resolution_clock;
     auto lastTime = clock::now();
     double accumulator = 0.0;
+
+    std::cout << "Controls:" << std::endl;
+    std::cout << "  SPACE - Step one instruction" << std::endl;
+    std::cout << "  ESC   - Exit" << std::endl;
 
     while (running)
     {
@@ -147,18 +154,38 @@ int main(int argc, char* argv[])
 
             if (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED)
             {
-                // Close main window ends program
                 if (event.window.windowID == SDL_GetWindowID(window))
                     running = false;
             }
+
+            // Handle keyboard input for stepping
+            if (event.type == SDL_EVENT_KEY_DOWN)
+            {
+                if (event.key.key == SDLK_SPACE)
+                {
+                    stepPressed = true;
+                }
+                else if (event.key.key == SDLK_ESCAPE)
+                {
+                    running = false;
+                }
+            }
         }
 
-        while (accumulator >= FRAME_TIME) {
-            for (int i = 0; i < CYCLES_PER_FRAME; i++) {
-                cpu->runCpuStep();
+        if (USE_FRAMERATE_CONTROL) {
+            // Framerate-controlled execution
+            while (accumulator >= FRAME_TIME) {
+                for (int i = 0; i < CYCLES_PER_FRAME; i++) {
+                    cpu->runCpuStep();
+                }
+                accumulator -= FRAME_TIME;
             }
-                
-            accumulator -= FRAME_TIME;
+        } else {
+            // Manual stepping
+            if (stepPressed) {
+                cpu->runCpuStep();
+                stepPressed = false;
+            }
         }
 
         if (registerWindow.isWindowOpen())
