@@ -30,6 +30,12 @@ enum CPUMode : uint8_t
 struct ProgramStatusRegister
 {
     uint32_t &CPSR;
+
+    uint32_t GetValue() const { return CPSR; }
+    void SetValue(uint32_t value) { CPSR = value; }
+    void SetFlags(uint32_t value) { CPSR = (CPSR & ~0xF0000000) | (value & 0xF0000000); }
+    void SetControl(uint32_t value) { CPSR = (CPSR & ~0xFF) | (value & 0xFF); }
+    
     CPUMode GetMode() const { return (CPUMode)(CPSR & 0x1F); }
     void SetMode(CPUMode mode)
     {

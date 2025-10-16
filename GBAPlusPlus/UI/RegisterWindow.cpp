@@ -74,7 +74,7 @@ void RegisterWindow::updateText()
     // Special registers
     oss << "SP: 0x" << *registers->GetRegister(STACK_POINTER) << "\n";
     oss << "LR: 0x" << *registers->GetRegister(LINK_REGISTER) << "\n";
-    oss << "PC: 0x" << *registers->GetRegister(PROGRAM_COUNTER) - 8 << "\n";
+    oss << "PC: 0x" << *registers->GetRegister(PROGRAM_COUNTER) << " (VBAM: 0x" << *registers->GetRegister(PROGRAM_COUNTER) - 4 << ")" << "\n";
 
     // CPSR
     ProgramStatusRegister psr = registers->GetProgramStatusRegister();

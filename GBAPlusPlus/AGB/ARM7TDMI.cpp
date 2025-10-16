@@ -42,9 +42,7 @@ void ARM7TDMI::runCpuStep()
         //move up the decoding instruction
         ExecutingInstruction = DecodingInstruction;
         //move up the fetched instruction
-        DecodingInstruction = FetchedInstruction;
-        //fetch a new instruction
-        FetchedInstruction = Read32();
+        DecodingInstruction = Read32();
     }
 }
 
@@ -222,17 +220,8 @@ void ARM7TDMI::flushPipeline()
         DecodingInstruction = 0;
         FetchedInstruction = 0;
 
-        //fetch new instruction
-        FetchedInstruction = Read32();
-
-        //move fetched into decoding, fetch new instruction
-        DecodingInstruction = FetchedInstruction;
-        FetchedInstruction = Read32();
-
-        //move decoding into executing, fetched into decoding, fetch new instruction
-        ExecutingInstruction = DecodingInstruction;
-        DecodingInstruction = FetchedInstruction;
-        FetchedInstruction = Read32();
+        ExecutingInstruction = Read32();
+        DecodingInstruction = Read32();
 
         isFlushed = true;
     }
@@ -335,33 +324,23 @@ uint32_t ARM7TDMI::ApplyShift(uint32_t value, uint8_t shiftType, uint8_t shiftAm
     return value;
 }
 
-bool ARM7TDMI::IsCarryFromShifter(uint32_t operand2, uint8_t shiftType, uint8_t shiftAmount)
+uint32_t ARM7TDMI::CalculateRotatedOperand(uint32_t instruction, bool& outCarry)
 {
-    // If no shift occurred, carry flag is unchanged
-    if (shiftAmount == 0 && shiftType != 3) {  // ROR with 0 is special
-        return registers->GetProgramStatusRegister().GetCarry();
+    uint8_t imm = instruction & 0xFF;
+    uint8_t rotate = (instruction >> 8) & 0xF;
+
+    uint32_t shiftAmount = rotate * 2;
+
+    if (shiftAmount == 0)
+    {
+        outCarry = false;
     }
-    
-    switch (shiftType) {
-    case 0: // LSL
-        if (shiftAmount == 0) return registers->GetProgramStatusRegister().GetCarry();
-        return (operand2 >> (32 - shiftAmount)) & 1;
-        
-    case 1: // LSR
-        if (shiftAmount == 0) return (operand2 >> 31) & 1;
-        return (operand2 >> (shiftAmount - 1)) & 1;
-        
-    case 2: // ASR
-        if (shiftAmount == 0) return (operand2 >> 31) & 1;
-        return (operand2 >> (shiftAmount - 1)) & 1;
-        
-    case 3: // ROR
-        if (shiftAmount == 0) {
-            // ROR #0 is actually RRX (rotate right with extend)
-            return (registers->GetProgramStatusRegister().GetCarry()) ? 1 : 0;
-        }
-        return (operand2 >> (shiftAmount - 1)) & 1;
+    else
+    {
+        outCarry = (imm >> (shiftAmount - 1)) & 1;
     }
+        
+    return (imm >> shiftAmount) | (imm << (32 - shiftAmount));
 }
 
 void ARM7TDMI::armDataProcessing(uint32_t instruction)
@@ -382,21 +361,7 @@ void ARM7TDMI::armDataProcessing(uint32_t instruction)
 
     if (isImmediate)
     {
-        uint8_t imm = instruction & 0xFF;
-        uint8_t rotate = (instruction >> 8) & 0xF;
-
-        uint32_t shiftAmount = rotate * 2;
-
-        if (shiftAmount == 0)
-        {
-            shiftCarry = false;
-        }
-        else
-        {
-            shiftCarry = (imm >> (shiftAmount - 1)) & 1;
-        }
-        
-        Operand2 = (imm >> shiftAmount) | (imm << (32 - shiftAmount));
+        Operand2 = CalculateRotatedOperand(instruction, shiftCarry);
     }
     else
     {
@@ -450,6 +415,16 @@ void ARM7TDMI::armDataProcessing(uint32_t instruction)
     case 0b0100:
         //ADD
         {
+            uint32_t result = Operand1 + Operand2;
+            *registers->GetRegister(DestinationRegister) = result;
+
+            if (setConditionCodes)
+            {
+                registers->GetProgramStatusRegister().SetZero(IsValueZero(result));
+                registers->GetProgramStatusRegister().SetNegative(IsValueNegative(result));
+                registers->GetProgramStatusRegister().SetCarry(IsCarryAddition(Operand1, Operand2));
+                registers->GetProgramStatusRegister().SetOverflow(IsOverflowAddition(Operand1, Operand2));
+            }
             return;
         }
     case 0b0101:
@@ -541,6 +516,26 @@ void ARM7TDMI::armSingleDataSwap(uint32_t instruction)
 
 void ARM7TDMI::armBranchExchange(uint32_t instruction)
 {
+    uint8_t registerValue = instruction & 0xF;
+
+    uint32_t address = *registers->GetRegister(registerValue);
+
+    uint8_t newMode = address & 0x1;
+
+    *registers->GetRegister(PROGRAM_COUNTER) = address & ~0x1;
+    
+    if (newMode == 0)
+    {
+        //ARM mode
+        registers->GetProgramStatusRegister().SetThumbState(false);
+    }
+    else
+    {
+        //THUMB mode, scary!
+        registers->GetProgramStatusRegister().SetThumbState(true);
+    }
+
+    flushPipeline();
 }
 
 void ARM7TDMI::armHalfwordDataTransfer(uint32_t instruction)
@@ -565,7 +560,7 @@ void ARM7TDMI::armSingleDataTransfer(uint32_t instruction)
     //handles immediate
     uint32_t offset = offsetOp;
 
-    bool shiftCarry;
+    bool shiftCarry = registers->GetProgramStatusRegister().GetCarry();
     if (registerValue)
     {
         uint8_t rm = instruction & 0xF;
@@ -648,7 +643,7 @@ void ARM7TDMI::armBranch(uint32_t instruction)
     }
     
     //set program counter to new offset
-    *registers->GetRegister(PROGRAM_COUNTER) += offset - 4;
+    *registers->GetRegister(PROGRAM_COUNTER) += offset;
 
     //flush the instruction pipeline, our position has changed!!
     flushPipeline();
@@ -676,4 +671,53 @@ void ARM7TDMI::armUndefined(uint32_t instruction)
 
 void ARM7TDMI::armPSRTransfer(uint32_t instruction)
 {
+    uint8_t signature = (instruction >> 16) & 0x3F;
+
+
+    if (signature == 0b001111)
+    {
+        //MRS - read CPSR/SPSR into register
+        bool IsSavedRegister = (instruction >> 22) & 0x1;
+        uint32_t Value = IsSavedRegister ? registers->GetSavedProgramStatusRegister().GetValue()
+            : registers->GetProgramStatusRegister().GetValue();
+
+        uint8_t registerValue = (instruction >> 12) & 0xF;
+        *registers->GetRegister(registerValue) = Value;
+    }
+    else
+    {
+        //MSR - read register into CPSR
+        bool IsImmediate = (instruction >> 25) & 0x1;
+        uint8_t fieldMask = (instruction >> 16) & 0xF;
+
+        bool flagsOnly = (fieldMask == 0xF) || ((instruction >> 22) & 1);
+
+        //only transfer flags
+        uint32_t Operand2 = 0;
+        if (flagsOnly)
+        {
+            if (IsImmediate)
+            {
+                bool notNeeded = false;
+                Operand2 = CalculateRotatedOperand(instruction, notNeeded);
+            }
+            else
+            {
+                //is register
+                uint8_t registerValue = instruction & 0xF;
+                Operand2 = *registers->GetRegister(registerValue);
+            }
+
+            registers->GetProgramStatusRegister().SetFlags(Operand2);
+        }
+        else
+        {
+            //is always register, cant be immediate
+            uint8_t registerValue = instruction & 0xF;
+            Operand2 = *registers->GetRegister(registerValue);
+
+            if (fieldMask & 0x1) registers->GetProgramStatusRegister().SetControl(Operand2);
+            if (fieldMask & 0x8) registers->GetProgramStatusRegister().SetFlags(Operand2);
+        }
+    }
 }

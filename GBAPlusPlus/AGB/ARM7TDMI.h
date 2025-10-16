@@ -74,6 +74,7 @@ private:
     bool IsOverflowSubtraction(uint32_t Value1, uint32_t Value2);
 
     uint32_t ApplyShift(uint32_t value, uint8_t shiftType, uint8_t shiftAmount, bool& outCarry);
+    uint32_t CalculateRotatedOperand(uint32_t instruction, bool& outCarry);
 
     //arm instruction handlers
     void armDataProcessing(uint32_t instruction);
