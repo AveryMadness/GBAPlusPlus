@@ -30,26 +30,32 @@ public:
     ARM7TDMI(MemoryBus* memoryBus, ARMRegisters* registers);
     void InitializeCpuForExecution();
     void executeARMInstruction(uint32_t instruction);
+    void executeThumbInstruction(uint16_t instruction);
     void runCpuStep();
 
 private:
 
     //helper read and write functions
     uint32_t Read32();
+    uint16_t Read16();
 
     uint32_t LoadWord(uint32_t address);
     void StoreWord(uint32_t address, uint32_t value);
     
     //typedef for calling instruction function
-    typedef void (ARM7TDMI::*Instruction)(uint32_t);
-
-    std::array<Instruction, 4096> armTable;
+    typedef void (ARM7TDMI::*ArmInstruction)(uint32_t);
+    typedef void (ARM7TDMI::*ThumbInstruction)(uint16_t);
+    
+    std::array<ArmInstruction, 4096> armTable;
+    std::array<ThumbInstruction, 1024> thumbTable;
 
     void buildArmTable();
+    void buildThumbTable();
 
     bool checkCondition(ConditionCode condition);
 
-    Instruction determineArmInstruction(uint32_t instruction);
+    ArmInstruction determineArmInstruction(uint32_t instruction);
+    ThumbInstruction determineThumbInstruction(uint16_t instruction);
     
     MemoryBus* memoryBus;
     ARMRegisters* registers;
@@ -57,6 +63,9 @@ private:
     uint32_t FetchedInstruction = 0;
     uint32_t DecodingInstruction = 0;
     uint32_t ExecutingInstruction = 0;
+
+    uint16_t ThumbDecodingInstruction = 0;
+    uint16_t ThumbExecutingInstruction = 0;
 
     bool isFlushed = false;
 
@@ -92,4 +101,26 @@ private:
     void armSoftwareInterrupt(uint32_t instruction);
     void armUndefined(uint32_t instruction);
     void armPSRTransfer(uint32_t instruction);
+
+    //thumb instruction handlers
+    void thumbMoveShiftedRegister(uint16_t instruction);
+    void thumbAddSubtract(uint16_t instruction);
+    void thumbMoveCompareAddSubtractImmediate(uint16_t instruction);
+    void thumbALUOperations(uint16_t instruction);
+    void thumbHiRegisterOperations(uint16_t instruction);
+    void thumbPCRelativeLoad(uint16_t instruction);
+    void thumbLoadStoreRegisterOffset(uint16_t instruction);
+    void thumbLoadStoreSignExtended(uint16_t instruction);
+    void thumbLoadStoreImmediateOffset(uint16_t instruction);
+    void thumbLoadStoreHalfword(uint16_t instruction);
+    void thumbSPRelativeLoadStore(uint16_t instruction);
+    void thumbLoadAddress(uint16_t instruction);
+    void thumbAddOffsetToSP(uint16_t instruction);
+    void thumbPushPopRegisters(uint16_t instruction);
+    void thumbMultipleLoadStore(uint16_t instruction);
+    void thumbConditionalBranch(uint16_t instruction);
+    void thumbSoftwareInterrupt(uint16_t instruction);
+    void thumbUnconditionalBranch(uint16_t instruction);
+    void thumbLongBranchWithLink(uint16_t instruction);
+    void thumbUndefined(uint16_t instruction);
 };
