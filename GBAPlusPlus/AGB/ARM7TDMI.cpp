@@ -12,8 +12,6 @@ ARM7TDMI::ARM7TDMI(MemoryBus* memoryBus, ARMRegisters* registers)
     buildThumbTable();
 }
 
-
-
 void ARM7TDMI::InitializeCpuForExecution()
 {
     flushPipeline();
@@ -1070,6 +1068,14 @@ void ARM7TDMI::thumbMultipleLoadStore(uint16_t instruction)
 
 void ARM7TDMI::thumbConditionalBranch(uint16_t instruction)
 {
+    ConditionCode condition = static_cast<ConditionCode>(instruction >> 8 & 0xF);
+    if (checkCondition(condition))
+    {
+        int8_t offset = static_cast<int8_t>(instruction & 0xFF);
+        
+        uint32_t* programCounter = registers->GetRegister(PROGRAM_COUNTER);
+        *programCounter = *programCounter + offset * 2;
+    }
 }
 
 void ARM7TDMI::thumbSoftwareInterrupt(uint16_t instruction)
