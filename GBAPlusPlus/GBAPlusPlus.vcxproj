@@ -113,7 +113,7 @@
       <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories);$(_ZVcpkgCurrentInstalledDir)include;Libraries\SDL3\include;Libraries\SDL3_ttf\include</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
-      <SubSystem>Console</SubSystem>
+      <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories);$(_ZVcpkgCurrentInstalledDir)$(_ZVcpkgConfigSubdir)lib;$(_ZVcpkgCurrentInstalledDir)$(_ZVcpkgConfigSubdir)lib\manual-link;Libraries\SDL3\lib\x64;Libraries\SDL3_ttf\lib\x64</AdditionalLibraryDirectories>
       <AdditionalDependencies>%(AdditionalDependencies);$(_ZVcpkgCurrentInstalledDir)$(_ZVcpkgConfigSubdir)lib\*.lib;SDL3.lib;SDL3_ttf.lib</AdditionalDependencies>
@@ -325,7 +325,8 @@
       <LinkCompiled>true</LinkCompiled>
     </ClCompile>
     <ClCompile Include="Main.cpp" />
-    <ClCompile Include="UI\MemoryViewerWindow.cpp">
+    <ClCompile Include="UI\EmulatorApp.cpp" />
+    <ClCompile Include="UI\MemoryViewerFrame.cpp">
       <RuntimeLibrary>MultiThreadedDebugDll</RuntimeLibrary>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
       <Optimization>Disabled</Optimization>
@@ -402,7 +403,7 @@
       <AdditionalIncludeDirectories>;C:\Users\Avery\Desktop\vcpkg\installed\x64-windows\include;Libraries\SDL3\include;Libraries\SDL3_ttf\include;C:\Users\Avery\Desktop\vcpkg\installed\x64-windows\include</AdditionalIncludeDirectories>
       <LinkCompiled>true</LinkCompiled>
     </ClCompile>
-    <ClCompile Include="UI\RegisterWindow.cpp">
+    <ClCompile Include="UI\RegisterFrame.cpp">
       <RuntimeLibrary>MultiThreadedDebugDll</RuntimeLibrary>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
       <Optimization>Disabled</Optimization>
@@ -484,8 +485,9 @@
     <ClInclude Include="AGB\ARM7TDMI.h" />
     <ClInclude Include="AGB\ARMRegisters.h" />
     <ClInclude Include="AGB\MemoryBus.h" />
-    <ClInclude Include="UI\MemoryViewerWindow.h" />
-    <ClInclude Include="UI\RegisterWindow.h" />
+    <ClInclude Include="UI\EmulatorApp.h" />
+    <ClInclude Include="UI\MemoryViewerFrame.h" />
+    <ClInclude Include="UI\RegisterFrame.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

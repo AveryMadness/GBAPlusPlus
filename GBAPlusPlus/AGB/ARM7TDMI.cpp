@@ -1,6 +1,7 @@
 ﻿#include "ARM7TDMI.h"
 
 #include <iostream>
+#include <string>
 #include <Windows.h>
 
 ARM7TDMI::ARM7TDMI(MemoryBus* memoryBus, ARMRegisters* registers)
@@ -871,6 +872,51 @@ void ARM7TDMI::armPSRTransfer(uint32_t instruction)
 
 void ARM7TDMI::thumbMoveShiftedRegister(uint16_t instruction)
 {
+    uint8_t OpCode = (instruction >> 11) & 0x3;
+    uint8_t Offset = (instruction >> 6) & 0x1F;
+    uint8_t SourceRegisterNum = (instruction >> 3) & 0x7;
+    uint8_t DestinationRegisterNum = instruction & 0x7;
+
+    uint32_t* SourceRegister = registers->GetRegister(SourceRegisterNum);
+    uint32_t* DestinationRegister = registers->GetRegister(DestinationRegisterNum);
+
+    switch (OpCode)
+    {
+    case 0:
+        {
+            //LSL
+            uint32_t value = *SourceRegister;
+            if (Offset < 32 && Offset > 0)
+                registers->GetProgramStatusRegister().SetCarry((value >> (32 - Offset)) & 1);
+            else if (Offset == 32)
+                registers->GetProgramStatusRegister().SetCarry(value & 1);
+            else if (Offset > 0)
+                registers->GetProgramStatusRegister().SetCarry(false);
+            
+            value = value << Offset;
+            *DestinationRegister = value;
+            
+            break;
+        }
+    case 1:
+        {
+            //LSR
+            uint32_t value = *SourceRegister;
+            value = value >> Offset;
+            *DestinationRegister = value;
+            break;
+        }
+    case 2:
+        {
+            //ASR
+            int32_t value = static_cast<int32_t>(*SourceRegister);
+            value = value >> Offset;
+            *DestinationRegister = static_cast<uint32_t>(value);
+        }
+        break;
+    default:
+        throw std::exception(("Invalid Move Shifted Register (Thumb) Opcode: " + std::to_string(OpCode)).c_str());
+    }
 }
 
 void ARM7TDMI::thumbAddSubtract(uint16_t instruction)
