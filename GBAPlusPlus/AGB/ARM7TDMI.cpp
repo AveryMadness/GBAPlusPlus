@@ -206,88 +206,113 @@ void ARM7TDMI::buildThumbTable()
     {
         uint32_t bits15_13 = (i >> 7) & 0x7;
         uint32_t bits12_11 = (i >> 5) & 0x3;
-        uint32_t bits10_8 = (i >> 2) & 0x7;
-        uint32_t bits7_6 = i & 0x3;
+        uint32_t bits10_8  = (i >> 2) & 0x7;
+        uint32_t bits15_10 = (i >> 4) & 0x3F;
 
+        // Move Shifted Register: bits15-13=000, bits12-11 != 11 (LSL/LSR/ASR)
         if (bits15_13 == 0b000 && bits12_11 != 0b11)
         {
             thumbTable[i] = &ARM7TDMI::thumbMoveShiftedRegister;
         }
-
+        // Add/Subtract: bits15-11=00011
         else if (bits15_13 == 0b000 && bits12_11 == 0b11)
         {
             thumbTable[i] = &ARM7TDMI::thumbAddSubtract;
         }
-
+        // Move/Compare/Add/Subtract Immediate: bits15-13=001
         else if (bits15_13 == 0b001)
         {
             thumbTable[i] = &ARM7TDMI::thumbMoveCompareAddSubtractImmediate;
         }
-
-        else if (bits15_13 == 0b010 && bits12_11 == 0b00 && bits10_8 == 0b000)
+        // ALU Operations: bits15-10=010000
+        else if (bits15_10 == 0b010000)
         {
             thumbTable[i] = &ARM7TDMI::thumbALUOperations;
         }
-
-        else if (bits15_13 == 0b010 && bits12_11 == 0b00 && bits10_8 == 0b001)
+        // Hi Register Operations / BX: bits15-10=010001
+        else if (bits15_10 == 0b010001)
         {
             thumbTable[i] = &ARM7TDMI::thumbHiRegisterOperations;
         }
-
+        // PC-Relative Load: bits15-11=01001
         else if (bits15_13 == 0b010 && bits12_11 == 0b01)
         {
             thumbTable[i] = &ARM7TDMI::thumbPCRelativeLoad;
         }
-
-        else if (bits15_13 == 0b010 && bits12_11 == 0b10)
+        // Load/Store Register Offset vs Sign-Extended:
+        // Both have bits15-12=0101. Distinguished by instruction bit 9 (index bit 3 of bits10_8).
+        //   bit9=0 -> register offset (STR/STRB/LDR/LDRB)
+        //   bit9=1 -> sign-extended   (STRH/LDSB/LDRH/LDSH)
+        else if (bits15_13 == 0b010 && bits12_11 == 0b10 && (bits10_8 & 0b010) == 0)
         {
             thumbTable[i] = &ARM7TDMI::thumbLoadStoreRegisterOffset;
         }
-        else if (bits15_13 == 0b010 && bits12_11 == 0b11)
+        else if (bits15_13 == 0b010 && bits12_11 == 0b10 && (bits10_8 & 0b010) != 0)
         {
             thumbTable[i] = &ARM7TDMI::thumbLoadStoreSignExtended;
         }
+        else if (bits15_13 == 0b010 && bits12_11 == 0b11 && (bits10_8 & 0b010) == 0)
+        {
+            thumbTable[i] = &ARM7TDMI::thumbLoadStoreRegisterOffset;
+        }
+        else if (bits15_13 == 0b010 && bits12_11 == 0b11 && (bits10_8 & 0b010) != 0)
+        {
+            thumbTable[i] = &ARM7TDMI::thumbLoadStoreSignExtended;
+        }
+        // Load/Store Immediate Offset: bits15-13=011
         else if (bits15_13 == 0b011)
         {
             thumbTable[i] = &ARM7TDMI::thumbLoadStoreImmediateOffset;
         }
-        else if (bits15_13 == 0b100 && (i >> 9) == 0b1000)
+        // Load/Store Halfword: bits15-13=100, bits12-11=00 or 01
+        else if (bits15_13 == 0b100 && (bits12_11 == 0b00 || bits12_11 == 0b01))
         {
             thumbTable[i] = &ARM7TDMI::thumbLoadStoreHalfword;
         }
-        else if (bits15_13 == 0b100 && (i >> 9) == 0b1001)
+        // SP-Relative Load/Store: bits15-13=100, bits12-11=10 or 11
+        else if (bits15_13 == 0b100 && (bits12_11 == 0b10 || bits12_11 == 0b11))
         {
             thumbTable[i] = &ARM7TDMI::thumbSPRelativeLoadStore;
         }
-        else if (bits15_13 == 0b101 && (i >> 9) == 0b1010)
+        // Load Address (ADD Rd, PC/SP): bits15-13=101, bits12-11=00 or 01
+        else if (bits15_13 == 0b101 && (bits12_11 == 0b00 || bits12_11 == 0b01))
         {
             thumbTable[i] = &ARM7TDMI::thumbLoadAddress;
         }
-        else if (bits15_13 == 0b101 && (i >> 6) == 0b101100)
+        // Add Offset to SP: bits15-8=10110000/10110001 -> bits15_13=101, bits12_11=10, bits10_8=000
+        else if (bits15_13 == 0b101 && bits12_11 == 0b10 && bits10_8 == 0b000)
         {
             thumbTable[i] = &ARM7TDMI::thumbAddOffsetToSP;
         }
-        else if (bits15_13 == 0b101 && bits12_11 == 0b11 && bits10_8 == 0b010)
+        // Push/Pop: bits15_13=101, bits12_11=10 or 11, bits10_8=100 or 101
+        else if (bits15_13 == 0b101 && (bits12_11 == 0b10 || bits12_11 == 0b11)
+                 && (bits10_8 == 0b100 || bits10_8 == 0b101))
         {
             thumbTable[i] = &ARM7TDMI::thumbPushPopRegisters;
         }
-        else if (bits15_13 == 0b110 && (i >> 9) == 0b1100)
+        // Multiple Load/Store (LDMIA/STMIA): bits15-13=110, bits12-11=00 or 01
+        else if (bits15_13 == 0b110 && (bits12_11 == 0b00 || bits12_11 == 0b01))
         {
             thumbTable[i] = &ARM7TDMI::thumbMultipleLoadStore;
         }
-        else if (bits15_13 == 0b110 && (i >> 9) == 0b1101 && bits10_8 != 0b111)
-        {
-            thumbTable[i] = &ARM7TDMI::thumbConditionalBranch;
-        }
-        else if (bits15_13 == 0b110 && (i >> 2) == 0b11011111)
+        // SWI: bits15-8=11011111 -> bits15_13=110, bits12_11=11, bits10_8=111
+        else if (bits15_13 == 0b110 && bits12_11 == 0b11 && bits10_8 == 0b111)
         {
             thumbTable[i] = &ARM7TDMI::thumbSoftwareInterrupt;
         }
-        else if (bits15_13 == 0b111 && (i >> 9) == 0b1110)
+        // Conditional Branch: bits15-12=1101, condition 0x0-0xE
+        // bits12_11=10 (cond 0x0-0x7) or bits12_11=11 with bits10_8 != 111 (cond 0x8-0xE)
+        else if (bits15_13 == 0b110 && (bits12_11 == 0b10 || bits12_11 == 0b11))
+        {
+            thumbTable[i] = &ARM7TDMI::thumbConditionalBranch;
+        }
+        // Unconditional Branch: bits15-13=111, bits12_11=00 or 01
+        else if (bits15_13 == 0b111 && (bits12_11 == 0b00 || bits12_11 == 0b01))
         {
             thumbTable[i] = &ARM7TDMI::thumbUnconditionalBranch;
         }
-        else if (bits15_13 == 0b111 && (i >> 9) == 0b1111)
+        // Long Branch with Link: bits15-11=11110 (hi half) or 11111 (lo half)
+        else if (bits15_13 == 0b111 && (bits12_11 == 0b10 || bits12_11 == 0b11))
         {
             thumbTable[i] = &ARM7TDMI::thumbLongBranchWithLink;
         }
@@ -322,7 +347,7 @@ bool ARM7TDMI::checkCondition(ConditionCode condition)
     case UnsignedHigher:
         return cpsr.GetCarry() && !cpsr.GetZero();
     case UnsignedLowerOrSame:
-        return !cpsr.GetCarry() && cpsr.GetZero();
+        return !cpsr.GetCarry() || cpsr.GetZero();
     case SignedGreaterOrSame:
         return cpsr.GetNegative() == cpsr.GetOverflow();
     case SignedLessThan:
@@ -381,8 +406,7 @@ void ARM7TDMI::flushPipeline()
 
 bool ARM7TDMI::IsValueNegative(uint32_t Value)
 {
-    if (Value & 0x80000000) return true;
-    return false;
+    return (Value >> 31) & 1;
 }
 
 bool ARM7TDMI::IsValueZero(uint32_t Value)
@@ -393,7 +417,7 @@ bool ARM7TDMI::IsValueZero(uint32_t Value)
 bool ARM7TDMI::IsCarryAddition(uint32_t Value1, uint32_t Value2)
 {
     uint32_t result = Value1 + Value2;
-    return (result < Value1) || (result > Value2); 
+    return result < Value1;
 }
 
 bool ARM7TDMI::IsCarrySubtraction(uint32_t Value1, uint32_t Value2)
@@ -521,7 +545,7 @@ void ARM7TDMI::armDataProcessing(uint32_t instruction)
 
         uint8_t shiftAmount = 0;
 
-        if (shiftImmFlag)
+        if (!shiftImmFlag)
         {
             shiftAmount = (instruction >> 7) & 0x1F;
         }
@@ -542,24 +566,16 @@ void ARM7TDMI::armDataProcessing(uint32_t instruction)
     {
     case 0b0000:
         //AND
-        {
-            return;
-        }
+        throw std::runtime_error("Data Processing opcode AND (0000) not implemented.");
     case 0b0001:
         //EOR
-        {
-            return;
-        }
+        throw std::runtime_error("Data Processing opcode EOR (0001) not implemented.");
     case 0b0010:
         //SUB
-        {
-            return;
-        }
+        throw std::runtime_error("Data Processing opcode SUB (0010) not implemented.");
     case 0b0011:
         //RSB
-        {
-            return;
-        }
+        throw std::runtime_error("Data Processing opcode RSB (0011) not implemented.");
     case 0b0100:
         //ADD
         {
@@ -577,22 +593,20 @@ void ARM7TDMI::armDataProcessing(uint32_t instruction)
         }
     case 0b0101:
         //ADC
-        {
-            return;
-        }
+        throw std::runtime_error("Data Processing opcode ADC (0101) not implemented.");
     case 0b0110:
         //SBC
-        {
-            return;
-        }
+        throw std::runtime_error("Data Processing opcode SBC (0110) not implemented.");
     case 0b0111:
         //RSC
-        {
-            return;
-        }
+        throw std::runtime_error("Data Processing opcode RSC (0111) not implemented.");
     case 0b1000:
         //TST
         {
+            uint32_t result = Operand1 & Operand2;
+            registers->GetProgramStatusRegister().SetZero(IsValueZero(result));
+            registers->GetProgramStatusRegister().SetNegative(IsValueNegative(result));
+            registers->GetProgramStatusRegister().SetCarry(shiftCarry);
             return;
         }
     case 0b1001:
@@ -612,19 +626,14 @@ void ARM7TDMI::armDataProcessing(uint32_t instruction)
             registers->GetProgramStatusRegister().SetNegative(IsValueNegative(result));
             registers->GetProgramStatusRegister().SetCarry(IsCarrySubtraction(Operand1, Operand2));
             registers->GetProgramStatusRegister().SetOverflow(IsOverflowSubtraction(Operand1, Operand2));
-            
             return;
         }
     case 0b1011:
         //CMN
-        {
-            return;
-        }
+        throw std::runtime_error("Data Processing opcode CMN (1011) not implemented.");
     case 0b1100:
         //ORR
-        {
-            return;
-        }
+        throw std::runtime_error("Data Processing opcode ORR (1100) not implemented.");
     case 0b1101:
         //MOV
         {
@@ -638,28 +647,37 @@ void ARM7TDMI::armDataProcessing(uint32_t instruction)
             return;
         }
     case 0b1110:
-        //BIC
         {
+            //BIC
+            uint32_t result = Operand1 & ~Operand2;
+            *registers->GetRegister(DestinationRegister) = result;
+            if (setConditionCodes)
+            {
+                registers->GetProgramStatusRegister().SetZero(IsValueZero(result));
+                registers->GetProgramStatusRegister().SetNegative(IsValueNegative(result));
+                registers->GetProgramStatusRegister().SetCarry(shiftCarry);
+            }
             return;
         }
     case 0b1111:
         //MVN
-        {
-            return;
-        }
+        throw std::runtime_error("Data Processing opcode MVN (1111) not implemented.");
     }
 }
 
 void ARM7TDMI::armMultiply(uint32_t instruction)
 {
+    throw std::runtime_error("ARM instruction MUL not implemented.");
 }
 
 void ARM7TDMI::armMultiplyLong(uint32_t instruction)
 {
+    throw std::runtime_error("ARM instruction MULL/MLAL not implemented.");
 }
 
 void ARM7TDMI::armSingleDataSwap(uint32_t instruction)
 {
+    throw std::runtime_error("ARM instruction SWP not implemented.");
 }
 
 void ARM7TDMI::armBranchExchange(uint32_t instruction)
@@ -688,6 +706,7 @@ void ARM7TDMI::armBranchExchange(uint32_t instruction)
 
 void ARM7TDMI::armHalfwordDataTransfer(uint32_t instruction)
 {
+    throw std::runtime_error("ARM instruction halfword data transfer (LDRH/STRH/LDRSB/LDRSH) not implemented.");
 }
 
 //LDR/STR
@@ -760,6 +779,86 @@ void ARM7TDMI::armSingleDataTransfer(uint32_t instruction)
 
 void ARM7TDMI::armBlockDataTransfer(uint32_t instruction)
 {
+    bool PreIndex = (instruction >> 24) & 1;
+    bool UpBit = (instruction >> 23) & 1;
+    bool ForceUser = (instruction >> 22) & 1;
+    bool WriteBack = (instruction >> 21) & 1;
+    bool bIsLoad = (instruction >> 20) & 1;
+
+    uint8_t Rn = (instruction >> 16) & 0xF;
+
+    CPUMode ForcedMode = None;
+
+    //check if PC is not transferred, but S bit is set (should force user mode registers)
+    if (ForceUser && !(instruction & (1 << 15)))
+    {
+        ForcedMode = User;
+    }
+
+    //collect number of set bits for registers, used for decrement
+    int registerCount = 0;
+    for (int i = 0; i <= 15; i++)
+        if (instruction & (1 << i)) registerCount++;
+
+    uint32_t BaseAddress = *registers->GetRegister(Rn);
+    uint32_t CurrentAddress = BaseAddress;
+
+    //when decrementing, we start at the very bottom and work our way up. this avoids needing a seperate loop to loop backwards
+    if (!UpBit)
+    {
+        CurrentAddress -= 4 * registerCount;
+    }
+
+    //loop through all possible registers at the start of the instruction, this is the register list
+    for (uint8_t i = 0; i <= 15; i++)
+    {
+        //check if we should operate on this bit (register)
+        if (instruction & (1 << i))
+        {
+            //if pre index, increment before loading/storing
+            if (PreIndex && UpBit)
+                CurrentAddress += 4;
+
+            if (bIsLoad)
+            {
+                uint32_t value = memoryBus->read32(CurrentAddress);
+                *registers->GetRegister(i, ForcedMode) = value;
+
+                //if we're loading PC, we need to flush pipeline
+                if (i == 15)
+                {
+                    flushPipeline();
+                }
+            }
+            else
+            {
+                //just write ts value nothing special
+                uint32_t value = *registers->GetRegister(i, ForcedMode);
+                memoryBus->write32(CurrentAddress, value);
+            }
+
+            //if post index, increment after loading/storing
+            //when not up, we always increment here, and never elsewhere. this is because we already handled the decrement case
+            if ((!PreIndex && UpBit) || !UpBit)
+                CurrentAddress += 4;   
+        }
+    }
+
+    //if writeback bit is set, we need to set the final address to the register that was used for the initial address
+    if (WriteBack)
+    {
+        if (UpBit)
+            *registers->GetRegister(Rn) = CurrentAddress;
+        else
+            *registers->GetRegister(Rn) = BaseAddress - 4 * registerCount;
+    }
+
+    //if force user bit is set, and PC is set to be moved, we need to restore SPSR into CPSR
+    if (ForceUser && instruction & (1 << 15))
+    {
+        uint32_t SPSR = registers->GetSavedProgramStatusRegister().GetValue();
+        registers->GetProgramStatusRegister().SetValue(SPSR);
+    }
 }
 
 void ARM7TDMI::armBranch(uint32_t instruction)
@@ -799,22 +898,32 @@ void ARM7TDMI::armBranch(uint32_t instruction)
 
 void ARM7TDMI::armCoprocessorDataTransfer(uint32_t instruction)
 {
+    throw std::runtime_error("ARM instruction coprocessor data transfer (LDC/STC) not implemented.");
 }
 
 void ARM7TDMI::armCoprocessorDataOperation(uint32_t instruction)
 {
+    throw std::runtime_error("ARM instruction coprocessor data operation (CDP) not implemented.");
 }
 
 void ARM7TDMI::armCoprocessorRegisterTransfer(uint32_t instruction)
 {
+    throw std::runtime_error("ARM instruction coprocessor register transfer (MRC/MCR) not implemented.");
 }
 
 void ARM7TDMI::armSoftwareInterrupt(uint32_t instruction)
 {
+    throw std::runtime_error("ARM instruction SWI not implemented.");
 }
 
 void ARM7TDMI::armUndefined(uint32_t instruction)
 {
+    throw std::runtime_error("Undefined ARM instruction: 0x" + 
+        [instruction]{ 
+            char buf[9]; 
+            snprintf(buf, sizeof(buf), "%08X", instruction); 
+            return std::string(buf); 
+        }());
 }
 
 void ARM7TDMI::armPSRTransfer(uint32_t instruction)
@@ -912,10 +1021,10 @@ void ARM7TDMI::thumbMoveShiftedRegister(uint16_t instruction)
             int32_t value = static_cast<int32_t>(*SourceRegister);
             value = value >> Offset;
             *DestinationRegister = static_cast<uint32_t>(value);
+            break;
         }
-        break;
     default:
-        throw std::exception(("Invalid Move Shifted Register (Thumb) Opcode: " + std::to_string(OpCode)).c_str());
+        throw std::runtime_error("Invalid Thumb Move Shifted Register opcode: " + std::to_string(OpCode));
     }
 }
 
@@ -965,7 +1074,7 @@ void ARM7TDMI::thumbMoveCompareAddSubtractImmediate(uint16_t instruction)
     uint8_t destRegister = (instruction >> 8) & 0x7;
     uint8_t offset = instruction & 0xFF;
 
-    uint32_t registerValue = (uint8_t)*registers->GetRegister(destRegister);
+    uint32_t registerValue = *registers->GetRegister(destRegister);
 
     switch (opCode)
     {
@@ -1014,10 +1123,232 @@ void ARM7TDMI::thumbMoveCompareAddSubtractImmediate(uint16_t instruction)
 
 void ARM7TDMI::thumbALUOperations(uint16_t instruction)
 {
+    //ALU opcode to execute
+    uint8_t OpCode = (instruction >> 6) & 0xF;
+    //Source register
+    uint8_t Rs = (instruction >> 3) & 0x7;
+    //Destination register
+    uint8_t Rd = instruction & 0x7;
+
+    uint32_t SourceValue = *registers->GetRegister(Rs);
+    uint32_t DestinationValue = *registers->GetRegister(Rd);
+
+    switch (OpCode)
+    {
+    case 0b0000:
+        {
+            //AND
+            uint32_t Result = DestinationValue & SourceValue;
+            *registers->GetRegister(Rd) = Result;
+            registers->GetProgramStatusRegister().SetZero(IsValueZero(Result));
+            registers->GetProgramStatusRegister().SetNegative(IsValueNegative(Result));
+            break;
+        }
+    case 0b0001:
+        {
+            //EOR
+            uint32_t Result = DestinationValue ^ SourceValue;
+            *registers->GetRegister(Rd) = Result;
+            registers->GetProgramStatusRegister().SetZero(IsValueZero(Result));
+            registers->GetProgramStatusRegister().SetNegative(IsValueNegative(Result));
+            break;
+        }
+    case 0b0010:
+        {
+            //LSL
+            uint32_t Result = DestinationValue << SourceValue;
+            *registers->GetRegister(Rd) = Result;
+            registers->GetProgramStatusRegister().SetZero(IsValueZero(Result));
+            registers->GetProgramStatusRegister().SetNegative(IsValueNegative(Result));
+            break;
+        }
+    case 0b0011:
+        {
+            //LSR
+            uint32_t Result = DestinationValue >> SourceValue;
+            *registers->GetRegister(Rd) = Result;
+            registers->GetProgramStatusRegister().SetZero(IsValueZero(Result));
+            registers->GetProgramStatusRegister().SetNegative(IsValueNegative(Result));
+            break;
+        }
+    case 0b0100:
+        {
+            //ASR
+            uint32_t Result = (int32_t)DestinationValue >> SourceValue;
+            *registers->GetRegister(Rd) = Result;
+            registers->GetProgramStatusRegister().SetZero(IsValueZero(Result));
+            registers->GetProgramStatusRegister().SetNegative(IsValueNegative(Result));
+            break;
+        }
+    case 0b0101:
+        {
+            //ADC
+            uint32_t CarryAdd = registers->GetProgramStatusRegister().GetCarry() ? 1 : 0;
+            uint32_t Result = DestinationValue + SourceValue + CarryAdd;
+            *registers->GetRegister(Rd) = Result;
+            registers->GetProgramStatusRegister().SetZero(IsValueZero(Result));
+            registers->GetProgramStatusRegister().SetNegative(IsValueNegative(Result));
+            registers->GetProgramStatusRegister().SetCarry(IsCarryAddition(DestinationValue, SourceValue + CarryAdd));
+            registers->GetProgramStatusRegister().SetOverflow(IsOverflowAddition(DestinationValue, SourceValue + CarryAdd));
+            break;
+        }
+    case 0b0110:
+        {
+            //SBC
+            uint32_t CarrySub = ~(registers->GetProgramStatusRegister().GetCarry() ? 1 : 0);
+            uint32_t Result = DestinationValue - SourceValue - CarrySub;
+            *registers->GetRegister(Rd) = Result;
+            registers->GetProgramStatusRegister().SetZero(IsValueZero(Result));
+            registers->GetProgramStatusRegister().SetNegative(IsValueNegative(Result));
+            registers->GetProgramStatusRegister().SetCarry(IsCarrySubtraction(DestinationValue, SourceValue - CarrySub));
+            registers->GetProgramStatusRegister().SetOverflow(IsOverflowSubtraction(DestinationValue, SourceValue - CarrySub));
+            break;
+        }
+    case 0b0111:
+        {
+            //ROR
+            bool Carry = registers->GetProgramStatusRegister().GetCarry();
+            uint8_t ShiftAmount = SourceValue & 0xFF;
+            //shift type 3 is ROR, no need to make a new function!!
+            uint32_t Result = ApplyShift(DestinationValue, 3, ShiftAmount, Carry);
+            *registers->GetRegister(Rd) = Result;
+            registers->GetProgramStatusRegister().SetZero(IsValueZero(Result));
+            registers->GetProgramStatusRegister().SetNegative(IsValueNegative(Result));
+            registers->GetProgramStatusRegister().SetCarry(Carry);
+            break;
+        }
+    case 0b1000:
+        {
+            //TST
+            uint32_t Result = DestinationValue & SourceValue;
+            registers->GetProgramStatusRegister().SetZero(IsValueZero(Result));
+            registers->GetProgramStatusRegister().SetNegative(IsValueNegative(Result));
+            break;
+        }
+    case 0b1001:
+        {
+            //NEG
+            uint32_t Result = 0 - SourceValue;
+            *registers->GetRegister(Rd) = Result;
+            registers->GetProgramStatusRegister().SetZero(IsValueZero(Result));
+            registers->GetProgramStatusRegister().SetNegative(IsValueNegative(Result));
+            break;
+        }
+    case 0b1010:
+        {
+            //CMP
+            uint32_t Result = DestinationValue - SourceValue;
+            registers->GetProgramStatusRegister().SetZero(IsValueZero(Result));
+            registers->GetProgramStatusRegister().SetNegative(IsValueNegative(Result));
+            registers->GetProgramStatusRegister().SetCarry(IsCarrySubtraction(DestinationValue, SourceValue));
+            registers->GetProgramStatusRegister().SetOverflow(IsOverflowSubtraction(DestinationValue, SourceValue));
+            break;
+        }
+    case 0b1011:
+        {
+            uint32_t Result = DestinationValue + SourceValue;
+            registers->GetProgramStatusRegister().SetZero(IsValueZero(Result));
+            registers->GetProgramStatusRegister().SetNegative(IsValueNegative(Result));
+            registers->GetProgramStatusRegister().SetCarry(IsCarryAddition(DestinationValue, SourceValue));
+            registers->GetProgramStatusRegister().SetOverflow(IsOverflowAddition(DestinationValue, SourceValue));
+            break; 
+        }
+    case 0b1100:
+        {
+            //ORR
+            uint32_t Result = DestinationValue | SourceValue;
+            *registers->GetRegister(Rd) = Result;
+            registers->GetProgramStatusRegister().SetZero(IsValueZero(Result));
+            registers->GetProgramStatusRegister().SetNegative(IsValueNegative(Result));
+            break;
+        }
+    case 0b1101:
+        {
+            //MUL
+            uint32_t Result = SourceValue * DestinationValue;
+            *registers->GetRegister(Rd) = Result;
+            registers->GetProgramStatusRegister().SetZero(IsValueZero(Result));
+            registers->GetProgramStatusRegister().SetNegative(IsValueNegative(Result));
+            break;
+        }
+    case 0b1110:
+        {
+            //BIC
+            uint32_t Result = DestinationValue & ~SourceValue;
+            *registers->GetRegister(Rd) = Result;
+            registers->GetProgramStatusRegister().SetZero(IsValueZero(Result));
+            registers->GetProgramStatusRegister().SetNegative(IsValueNegative(Result));
+            break;
+        }
+    case 0b1111:
+        {
+            //MVN
+            uint32_t Result = ~SourceValue;
+            *registers->GetRegister(Rd) = Result;
+            registers->GetProgramStatusRegister().SetZero(IsValueZero(Result));
+            registers->GetProgramStatusRegister().SetNegative(IsValueNegative(Result));
+            break;
+        }
+    default:
+        throw std::runtime_error("Thumb ALU operator out of bounds.");
+    }
 }
 
 void ARM7TDMI::thumbHiRegisterOperations(uint16_t instruction)
 {
+    uint8_t OpCode = (instruction >> 8) & 0x3;
+    bool H1 = (instruction >> 7) & 0x1;
+    bool H2 = (instruction >> 6) & 0x1;
+
+    uint8_t Rs = (instruction >> 3) & 0x7;
+    uint8_t Rd = instruction & 0x7;
+
+    uint8_t RsMasked = Rs + (H2 ? 8 : 0);
+    uint8_t RdMasked = Rd + (H1 ? 8 : 0);
+
+    switch (OpCode)
+    {
+        case 0x00:
+        {
+                //ADD
+                *registers->GetRegister(RdMasked) += *registers->GetRegister(RsMasked);
+                break;
+        }
+        case 0x01:
+        {
+                //CMP
+                uint32_t op1 = *registers->GetRegister(RdMasked);
+                uint32_t op2 = *registers->GetRegister(RsMasked);
+                uint32_t result = op1 + op2;
+                registers->GetProgramStatusRegister().SetZero(IsValueZero(result));
+                registers->GetProgramStatusRegister().SetNegative(IsValueNegative(result));
+                registers->GetProgramStatusRegister().SetCarry(IsCarrySubtraction(op1, op2));
+                registers->GetProgramStatusRegister().SetOverflow(IsOverflowSubtraction(op1, op2));
+                break;
+        }
+        case 0x02:
+        {
+                //MOV
+                *registers->GetRegister(RdMasked) = *registers->GetRegister(RsMasked);
+                break;
+        }
+        case 0x03:
+        {
+                //BX
+                uint32_t address = *registers->GetRegister(RsMasked);
+                //first bit of address is thumb state. 1 == THUMB 0 == ARM
+                registers->GetProgramStatusRegister().SetThumbState(address & 0x1);
+                //set program counter address, aligned
+                *registers->GetRegister(PROGRAM_COUNTER) = address & ~0x1;
+                //flush pipeline to collect new instructions
+                flushPipeline();
+                break;
+        }
+        default:
+        {
+                throw std::runtime_error("thumb HI register operation opcode type is undefined.");
+        }
+    }
 }
 
 void ARM7TDMI::thumbPCRelativeLoad(uint16_t instruction)
@@ -1082,34 +1413,231 @@ void ARM7TDMI::thumbLoadStoreRegisterOffset(uint16_t instruction)
 
 void ARM7TDMI::thumbLoadStoreSignExtended(uint16_t instruction)
 {
+    //i dont know what this is
+    bool HFlag = (instruction >> 11) & 0x1;
+    bool bSignExtended = (instruction >> 10) & 0x1;
+    uint8_t OffsetRegister = (instruction >> 6) & 0x7;
+    uint8_t BaseRegister = (instruction >> 3) & 0x7;
+    uint8_t DestinationRegister = instruction & 0x7;
+
+    uint32_t Offset = *registers->GetRegister(OffsetRegister);
+    uint32_t BaseAddress = *registers->GetRegister(BaseRegister);
+    uint32_t Address = BaseAddress + Offset;
+
+    if (bSignExtended)
+    {
+        if (HFlag)
+        {
+            //LDSH
+            int16_t value = memoryBus->read16(Address);
+            *registers->GetRegister(DestinationRegister) = (int32_t)value;
+        }
+        else
+        {
+            //LDSB
+            int8_t value = memoryBus->read8(Address);
+            *registers->GetRegister(DestinationRegister) = (int32_t)value;
+        }
+    }
+    else
+    {
+        if (HFlag)
+        {
+            //LDRH
+            uint16_t value = memoryBus->read16(Address);
+            *registers->GetRegister(DestinationRegister) = value;
+        }
+        else
+        {
+            //STRH
+            uint32_t value = *registers->GetRegister(DestinationRegister);
+            memoryBus->write16(Address, (uint16_t)value);
+        }
+    }
 }
 
 void ARM7TDMI::thumbLoadStoreImmediateOffset(uint16_t instruction)
 {
+    bool bIsByte = (instruction >> 12) & 0x1;
+    bool bIsLoad = (instruction >> 11) & 0x1;
+    uint8_t Offset5 = (instruction >> 6) & 0x1F;
+    uint8_t Rb = (instruction >> 3) & 0x7;
+    uint8_t Rd = instruction & 0x7;
+
+    //real offset is 7 bits if its a word transfer, stored as Offset >> 2, so to get the real offset back we do Offset << 2.
+    uint32_t Offset = bIsByte ? Offset5 : Offset5 << 2;
+    
+    uint32_t BaseAddress = *registers->GetRegister(Rb);
+    uint32_t Address = BaseAddress + Offset;
+
+    if (bIsLoad)
+    {
+        if (bIsByte)
+        {
+            uint8_t value = memoryBus->read8(Address);
+            *registers->GetRegister(Rd) = value;
+        }
+        else
+        {
+            uint32_t value = memoryBus->read32(Address);
+            *registers->GetRegister(Rd) = value;
+        }
+
+        if (Rd == PROGRAM_COUNTER)
+        {
+            flushPipeline();
+        }
+    }
+    else
+    {
+        if (bIsByte)
+        {
+            memoryBus->write8(Address, *registers->GetRegister(Rd));
+        }
+        else
+        {
+            memoryBus->write32(Address, *registers->GetRegister(Rd));
+        }
+    }
 }
 
 void ARM7TDMI::thumbLoadStoreHalfword(uint16_t instruction)
 {
+    bool bIsLoad = (instruction >> 11) & 0x1;
+    uint8_t Offset5 = (instruction >> 6) & 0x1F;
+    uint8_t Rb = (instruction >> 3) & 0x7;
+    uint8_t Rd = instruction & 0x7;
+
+    //Offset5 is stored as Imm >> 1, to reduce bits by one
+    uint8_t Imm = Offset5 << 1;
+
+    uint32_t BaseAddress = *registers->GetRegister(Rb);
+    uint32_t Address = BaseAddress + Imm;
+
+    if (bIsLoad)
+    {
+        //LDRH
+        //cast 16 bit read to uint32_t to unset top bits automatically
+        uint32_t Value = (uint32_t)memoryBus->read16(Address);
+        *registers->GetRegister(Rd) = Value;
+    }
+    else
+    {
+        //STRH
+        //since we're storing a halfword, mask out the top bits
+        uint16_t ValueToStore = *registers->GetRegister(Rd) & 0xFFFF;
+        //write the 16 valid bits to the address
+        memoryBus->write16(Address, ValueToStore);
+    }
 }
 
 void ARM7TDMI::thumbSPRelativeLoadStore(uint16_t instruction)
 {
+    //if we're loading
+    bool bIsLoad = (instruction >> 11) & 0x1;
+    //destination register
+    uint8_t Rd = (instruction >> 8) & 0x7;
+    
+    uint8_t Word8 = instruction & 0xFF;
+    //Offset = Word8 << 2 (x 4), since Word8 is stored as Offset >> 2
+    uint32_t Offset = Word8 * 4;
+
+    uint32_t CurrentStackPointer = *registers->GetRegister(STACK_POINTER);
+    uint32_t Address = CurrentStackPointer + Offset;
+
+    if (bIsLoad)
+    {
+        *registers->GetRegister(Rd) = memoryBus->read32(Address);
+    }
+    else
+    {
+        memoryBus->write32(Address, *registers->GetRegister(Rd));
+    }
 }
 
 void ARM7TDMI::thumbLoadAddress(uint16_t instruction)
 {
+    throw std::runtime_error("Thumb instruction load address (ADD Rd, PC/SP) not implemented.");
 }
 
 void ARM7TDMI::thumbAddOffsetToSP(uint16_t instruction)
 {
+    //if the offset is negative
+    bool subtract = (instruction >> 7) & 0x1;
+    uint8_t SWord7 = instruction & 0x7F;
+
+    //extend 7 bit to 9 bit, shift left twice
+    uint16_t SWord9 = SWord7 * 4;
+
+    if (subtract)
+    {
+        *registers->GetRegister(STACK_POINTER) -= SWord9; 
+    }
+    else
+    {
+        *registers->GetRegister(STACK_POINTER) += SWord9;
+    }
 }
 
 void ARM7TDMI::thumbPushPopRegisters(uint16_t instruction)
 {
+    //Store or Load
+    bool bLoad = (instruction >> 11) & 0x1;
+    //Store LR/Load PC
+    bool R = (instruction >> 8) & 0x1;
+    
+    //list of registers to load/store starts at bit 0. 1 bit for each register from R0 to R7
+
+    //POP
+    if (bLoad)
+    {
+        //load from lowest bit first, R0, so loop forwards
+        for (int i = 0; i <= 7; i++)
+        {
+            //check if bit i is set in instruction, would correspond to Ri in the register list.
+            //if set, load/store this register.
+            if (instruction & (1 << i))
+            {
+                //read register from stack pointer
+                *registers->GetRegister(i) = memoryBus->read32(*registers->GetRegister(STACK_POINTER));
+                //increment stack pointer to next value
+                *registers->GetRegister(STACK_POINTER) += 4;
+            }
+        }
+
+        if (R)
+        {
+            *registers->GetRegister(PROGRAM_COUNTER) = memoryBus->read32(*registers->GetRegister(STACK_POINTER));
+            *registers->GetRegister(STACK_POINTER) += 4;
+            flushPipeline();
+        }
+    }
+    //PUSH
+    else
+    {
+        //store from highest bit first, R7, so loop backward
+        for (int i = 7; i >= 0; i--)
+        {
+            //same as POP/Store
+            if (instruction & (1 << i))
+            {
+                //decrement stack pointer first.
+                *registers->GetRegister(STACK_POINTER) -= 4;
+                memoryBus->write32(*registers->GetRegister(STACK_POINTER), *registers->GetRegister(i));
+            }
+        }
+
+        if (R)
+        {
+            *registers->GetRegister(STACK_POINTER) -= 4;
+            memoryBus->write32(*registers->GetRegister(STACK_POINTER), *registers->GetRegister(LINK_REGISTER));
+        }
+    }
 }
 
 void ARM7TDMI::thumbMultipleLoadStore(uint16_t instruction)
 {
+    throw std::runtime_error("Thumb instruction multiple load/store (LDMIA/STMIA) not implemented.");
 }
 
 void ARM7TDMI::thumbConditionalBranch(uint16_t instruction)
@@ -1121,21 +1649,63 @@ void ARM7TDMI::thumbConditionalBranch(uint16_t instruction)
         
         uint32_t* programCounter = registers->GetRegister(PROGRAM_COUNTER);
         *programCounter = *programCounter + offset * 2;
+        flushPipeline();
     }
 }
 
 void ARM7TDMI::thumbSoftwareInterrupt(uint16_t instruction)
 {
+    throw std::runtime_error("Thumb instruction SWI not implemented.");
 }
 
 void ARM7TDMI::thumbUnconditionalBranch(uint16_t instruction)
 {
+    uint16_t Offset11 = instruction & 0x7FF;
+    //offset is stored as Offset11 = Offset >> 1, to save a bit, restore bit with << 1
+    uint16_t Offset = Offset11 << 1;
+
+    *registers->GetRegister(PROGRAM_COUNTER) += Offset;
+    flushPipeline();
 }
 
 void ARM7TDMI::thumbLongBranchWithLink(uint16_t instruction)
 {
+    bool isLow = (instruction >> 11) & 0x1;
+    uint32_t offset = instruction & 0x7FF;
+
+    //first instruction in 2 instruction set, set up the link register with the lower half of the address
+    if (!isLow)
+    {
+        //check bit 10
+        bool shouldShift = offset & 0x400;
+        //fill top bits if we should shift, to sign extend
+        int32_t signedOffset = shouldShift ? offset | 0xFFFFF800 : offset;
+        //shift left 12 times
+        signedOffset = signedOffset << 12;
+        *registers->GetRegister(LINK_REGISTER) = *registers->GetRegister(PROGRAM_COUNTER) + signedOffset;
+    }
+    else
+    {
+        //get next instruction for the final link register value
+        uint32_t nextInstruction = *registers->GetRegister(PROGRAM_COUNTER) - 2;
+        
+        uint32_t currentLinkRegisterValue = *registers->GetRegister(LINK_REGISTER);
+        //LR = LR + (offset << 1), shift left once, align
+        uint32_t newLinkRegisterValue = (currentLinkRegisterValue + (offset << 1)) & ~1;
+        //set PC to new LR value
+        *registers->GetRegister(PROGRAM_COUNTER) = newLinkRegisterValue;
+        //set LR to final value, next instruction
+        *registers->GetRegister(LINK_REGISTER) = nextInstruction | 1; // force thumb mode on address (bit 0 = 1)
+        flushPipeline();
+    }
 }
 
 void ARM7TDMI::thumbUndefined(uint16_t instruction)
 {
+    throw std::runtime_error("Undefined Thumb instruction: 0x" +
+        [instruction]{
+            char buf[5];
+            snprintf(buf, sizeof(buf), "%04X", instruction);
+            return std::string(buf);
+        }());
 }

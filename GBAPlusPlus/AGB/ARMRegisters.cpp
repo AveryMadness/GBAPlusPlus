@@ -2,9 +2,15 @@
 
 #include <exception>
 
-uint32_t* ARMRegisters::GetRegister(uint8_t Register)
+uint32_t* ARMRegisters::GetRegister(uint8_t Register, CPUMode ForcedMode)
 {
     CPUMode mode = GetProgramStatusRegister().GetMode();
+
+    if (ForcedMode != None)
+    {
+        mode = ForcedMode;
+    }
+    
     switch (Register)
     {
     case 0:

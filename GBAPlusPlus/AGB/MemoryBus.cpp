@@ -206,6 +206,10 @@ void MemoryBus::write8(uint32_t address, uint8_t value)
 }
 
 void MemoryBus::write16(uint32_t address, uint16_t value) {
+    if (address == 0x03007EA0)
+    {
+        printf("");
+    }
     address &= ~1;
     
     write16Aligned(address, value);

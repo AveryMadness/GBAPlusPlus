@@ -17,6 +17,7 @@
 
 enum CPUMode : uint8_t
 {
+    None = 0x00,
     User = 0x10,
     FIQ = 0x11,
     IRQ = 0x12,
@@ -156,5 +157,5 @@ private:
 public:
     ProgramStatusRegister GetProgramStatusRegister();
     ProgramStatusRegister GetSavedProgramStatusRegister();
-    uint32_t* GetRegister(uint8_t Register);
+    uint32_t* GetRegister(uint8_t Register, CPUMode ForcedMode = None);
 };

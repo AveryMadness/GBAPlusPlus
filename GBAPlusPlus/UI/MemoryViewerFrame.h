@@ -1,37 +1,36 @@
 ﻿// MemoryViewerFrame.h
 #pragma once
 #include <wx/wx.h>
-#include <wx/grid.h>
 #include "../AGB/MemoryBus.h"
 
 class MemoryViewerFrame : public wxFrame {
 public:
     MemoryViewerFrame(wxWindow* parent, MemoryBus* bus);
-    
     void UpdateDisplay();
-    void ScrollToAddress(uint32_t address);
-    
+
 private:
+    MemoryBus*   memoryBus;
+    wxWindow*    memoryPanel;
+    wxTextCtrl*  gotoInput;
+    wxFont       monoFont;
+
+    uint32_t  viewOffset;
+    int64_t   selectedAddress;   // -1 = none
+    int       bytesPerRow;
+    int       rowHeight;
+    int       headerHeight;
+    int       visibleRows;
+
+    void RecalcVisibleRows(int panelHeight);
+    void ScrollToAddress(uint32_t address);
+    void RenderMemory(wxDC& dc);
+
     void OnGoto(wxCommandEvent& event);
-    void OnScroll(wxScrollWinEvent& event);
-    void OnSize(wxSizeEvent& event);
     void OnPaint(wxPaintEvent& event);
     void OnMouseWheel(wxMouseEvent& event);
     void OnLeftClick(wxMouseEvent& event);
+    void OnMemPanelSize(wxSizeEvent& event);   // NEW - was missing
     void OnClose(wxCloseEvent& event);
-    
-    void RenderMemory(wxDC& dc);
-    wxColour GetColorForAddress(uint32_t address);
-    
-    MemoryBus* memoryBus;
-    uint32_t viewOffset;
-    int bytesPerRow;
-    int rowHeight;
-    int visibleRows;
-    
-    wxTextCtrl* gotoInput;
-    wxFont monoFont;
-    wxWindow* memoryPanel;
-    
+
     wxDECLARE_EVENT_TABLE();
 };
