@@ -1,5 +1,6 @@
 ﻿// RegisterFrame.cpp
 #include "RegisterFrame.h"
+#include "../AGB/MemoryBus.h"
 #include <sstream>
 #include <iomanip>
 
@@ -28,11 +29,14 @@ static const char* ModeToString(CPUMode mode) {
     }
 }
 
-RegisterFrame::RegisterFrame(wxWindow* parent, ARMRegisters* regs)
+RegisterFrame::RegisterFrame(wxWindow* parent, ARMRegisters* regs, MemoryBus* bus,
+                             std::mutex* dataMutex)
     : wxFrame(parent, wxID_ANY, "Registers",
               wxDefaultPosition, wxSize(340, 640),
               wxDEFAULT_FRAME_STYLE & ~wxRESIZE_BORDER & ~wxMAXIMIZE_BOX)
     , registers(regs)
+    , memoryBus(bus)
+    , dataMutex(dataMutex)
 {
     SetBackgroundColour(BG_DARK);
     SetForegroundColour(TEXT_PRIMARY);
@@ -86,6 +90,7 @@ RegisterFrame::RegisterFrame(wxWindow* parent, ARMRegisters* regs)
 
 void RegisterFrame::OnPaint(wxPaintEvent&) {
     wxPaintDC dc(registerPanel);
+    std::lock_guard<std::mutex> lock(*dataMutex);
     DrawRegisters(dc);
 }
 
@@ -193,6 +198,17 @@ void RegisterFrame::DrawRegisters(wxDC& dc) {
     dc.DrawRoundedRectangle(thumbX - 4, y - 2, thumbSz.x + 12, rowH - 2, 4);
     dc.SetTextForeground(thumbColor);
     dc.DrawText(thumbStr, thumbX + 2, y);
+
+    const bool halted = memoryBus && memoryBus->IsHalted();
+    wxString haltStr = halted ? "HALTED" : "ACTIVE";
+    wxColour haltColor = halted ? ACCENT_RED : TEXT_DIM;
+    dc.SetBrush(wxBrush(halted ? wxColour(50, 22, 22) : wxColour(25, 27, 32)));
+    dc.SetPen(wxPen(halted ? ACCENT_RED : BORDER_COLOR, 1));
+    wxSize haltSz = dc.GetTextExtent(haltStr);
+    int haltX = thumbX + thumbSz.x + 20;
+    dc.DrawRoundedRectangle(haltX - 4, y - 2, haltSz.x + 12, rowH - 2, 4);
+    dc.SetTextForeground(haltColor);
+    dc.DrawText(haltStr, haltX + 2, y);
     y += rowH + 8;
 
     // Flags row

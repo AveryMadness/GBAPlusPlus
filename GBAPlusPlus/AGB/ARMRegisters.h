@@ -155,6 +155,7 @@ private:
     uint32_t EmptySPSR;
 
 public:
+    void Reset();
     ProgramStatusRegister GetProgramStatusRegister();
     ProgramStatusRegister GetSavedProgramStatusRegister();
     uint32_t* GetRegister(uint8_t Register, CPUMode ForcedMode = None);

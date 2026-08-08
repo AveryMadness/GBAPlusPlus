@@ -3,6 +3,7 @@
 #include <iostream>
 #include <string>
 #include <Windows.h>
+#include "Disassembler.h"
 
 ARM7TDMI::ARM7TDMI(MemoryBus* memoryBus, ARMRegisters* registers)
 {
@@ -32,44 +33,215 @@ void ARM7TDMI::executeThumbInstruction(uint16_t instruction)
 
 void ARM7TDMI::runCpuStep()
 {
-    if (!registers->GetProgramStatusRegister().GetThumbState())
+    if (memoryBus->IsHalted())
     {
-        //arm mode
-        ConditionCode condition = static_cast<ConditionCode>((ExecutingInstruction >> 28) & 0xF);
+        //keep running hardware
+        memoryBus->TickPPU();
+        memoryBus->TickTimers();
+        totalCycles++;
 
-        if (checkCondition(condition))
+        if (InterruptPending())
         {
-            //execute instruction ready to be executed
-            executeARMInstruction(ExecutingInstruction);
+            memoryBus->ClearHalt();
+            EnterInterrupt();
         }
+        return;
+    }
 
-        //don't move up instructions after flushing pipeline.
-        if (isFlushed)
+    bool thumbMode = registers->GetProgramStatusRegister().GetThumbState();
+    //trace stuff
+    bool tracingThisStep = static_cast<bool>(traceFile);
+    uint32_t traceAddress = 0;
+    uint32_t traceOpcode = 0;
+    if (tracingThisStep)
+    {
+        uint32_t pcNow = *registers->GetRegister(PROGRAM_COUNTER);
+        traceAddress = thumbMode ? (pcNow - 4) : (pcNow - 8);
+        traceOpcode = thumbMode ? ThumbExecutingInstruction : ExecutingInstruction;
+    }
+
+    bool conditionPassed = true;
+
+    try
+    {
+        if (!thumbMode)
         {
-            isFlushed = false;
+            //arm mode
+            ConditionCode condition = static_cast<ConditionCode>((ExecutingInstruction >> 28) & 0xF);
+            conditionPassed = checkCondition(condition);
+
+            if (conditionPassed)
+            {
+                //execute instruction ready to be executed
+                executeARMInstruction(ExecutingInstruction);
+            }
+
+            //don't move up instructions after flushing pipeline.
+            if (isFlushed)
+            {
+                isFlushed = false;
+            }
+            else
+            {
+                //move up the decoding instruction
+                ExecutingInstruction = DecodingInstruction;
+                //move up the fetched instruction
+                DecodingInstruction = Read32();
+            }
         }
         else
         {
-            //move up the decoding instruction
-            ExecutingInstruction = DecodingInstruction;
-            //move up the fetched instruction
-            DecodingInstruction = Read32();
+            executeThumbInstruction(ThumbExecutingInstruction);
+
+            if (isFlushed)
+            {
+                isFlushed = false;
+            }
+            else
+            {
+                ThumbExecutingInstruction = ThumbDecodingInstruction;
+                ThumbDecodingInstruction = Read16();
+            }
         }
     }
+    catch (...)
+    {
+        if (tracingThisStep)
+            WriteTraceLine(traceAddress, thumbMode, traceOpcode, conditionPassed, true);
+        throw;
+    }
+
+    if (tracingThisStep)
+        WriteTraceLine(traceAddress, thumbMode, traceOpcode, conditionPassed, false);
+
+    //advance timers
+    uint32_t elapsedCycles = memoryBus->ConsumeCycles();
+    for (uint32_t i = 0; i < elapsedCycles; i++)
+    {
+        memoryBus->TickPPU();
+        memoryBus->TickTimers();
+    }
+    totalCycles += elapsedCycles;
+
+    if (InterruptPending())
+        EnterInterrupt();
+}
+
+uint64_t ARM7TDMI::GetTotalCycles() const
+{
+    return totalCycles;
+}
+
+bool ARM7TDMI::EnableTracing(const std::string& filePath, size_t maxLines)
+{
+    auto file = std::make_unique<std::ofstream>(filePath, std::ios::out | std::ios::trunc);
+    if (!file->is_open())
+        return false;
+
+    traceFile = std::move(file);
+    traceLineCount = 0;
+    traceMaxLines = maxLines;
+    traceHasPrevious = false;
+    traceLastFlags.clear();
+
+    *traceFile << "; address   mode  opcode    disassembly (up to first divergence is what matters)\n";
+    *traceFile << "; followed by post-instruction register state: R0-R12 SP LR PC CPSR[NZCVIFT] MODE\n";
+    *traceFile << "; only registers that changed since the previous line are shown\n";
+    return true;
+}
+
+void ARM7TDMI::DisableTracing()
+{
+    traceFile.reset();
+}
+
+bool ARM7TDMI::IsTracing() const
+{
+    return static_cast<bool>(traceFile);
+}
+
+void ARM7TDMI::WriteTraceLine(uint32_t address, bool thumbMode, uint32_t opcode, bool conditionPassed, bool threw)
+{
+    if (!traceFile || !traceFile->is_open())
+        return;
+
+    char addrBuf[9];
+    snprintf(addrBuf, sizeof(addrBuf), "%08X", address);
+
+    char opBuf[9];
+    if (thumbMode)
+        snprintf(opBuf, sizeof(opBuf), "%04X    ", static_cast<uint16_t>(opcode));
     else
-    {
-        executeThumbInstruction(ThumbExecutingInstruction);
+        snprintf(opBuf, sizeof(opBuf), "%08X", opcode);
 
-        if (isFlushed)
-        {
-            isFlushed = false;
-        }
-        else
-        {
-            ThumbExecutingInstruction = ThumbDecodingInstruction;
-            ThumbDecodingInstruction = Read16();
-        }
+    std::string disasm = thumbMode
+        ? Disassembler::DisassembleThumb(static_cast<uint16_t>(opcode), address)
+        : Disassembler::DisassembleARM(opcode, address);
+
+    *traceFile << addrBuf << " " << (thumbMode ? "THUMB" : "ARM  ") << " " << opBuf << "  "
+               << (conditionPassed ? "" : "(skip) ") << disasm;
+
+    if (threw)
+    {
+        *traceFile << "   <-- THREW (exception below)\n";
+        traceFile->flush();
+        traceLineCount++;
+        return;
     }
+
+    static const char* regNames[16] = {
+        "R0", "R1", "R2", "R3", "R4", "R5", "R6", "R7",
+        "R8", "R9", "R10", "R11", "R12", "SP", "LR", "PC"
+    };
+
+    uint32_t currentRegs[16];
+    for (int i = 0; i <= 12; i++)
+        currentRegs[i] = *registers->GetRegister(static_cast<uint8_t>(i));
+    currentRegs[13] = *registers->GetRegister(STACK_POINTER);
+    currentRegs[14] = *registers->GetRegister(LINK_REGISTER);
+    currentRegs[15] = *registers->GetRegister(PROGRAM_COUNTER);
+
+    char regBuf[16];
+    for (int i = 0; i < 16; i++)
+    {
+        if (!traceHasPrevious || currentRegs[i] != traceLastRegs[i])
+        {
+            snprintf(regBuf, sizeof(regBuf), " %s=%08X", regNames[i], currentRegs[i]);
+            *traceFile << regBuf;
+        }
+        traceLastRegs[i] = currentRegs[i];
+    }
+
+    ProgramStatusRegister psr = registers->GetProgramStatusRegister();
+    char flagsBuf[8];
+    snprintf(flagsBuf, sizeof(flagsBuf), "%c%c%c%c%c%c%c",
+        psr.GetNegative() ? 'N' : '-',
+        psr.GetZero() ? 'Z' : '-',
+        psr.GetCarry() ? 'C' : '-',
+        psr.GetOverflow() ? 'V' : '-',
+        psr.GetIRQDisable() ? 'I' : '-',
+        psr.GetFIQDisable() ? 'F' : '-',
+        psr.GetThumbState() ? 'T' : '-');
+    std::string modeStr = Disassembler::ModeToString(psr.GetMode());
+    std::string flagsAndMode = std::string(flagsBuf) + " " + modeStr;
+
+    if (!traceHasPrevious || flagsAndMode != traceLastFlags)
+        *traceFile << " CPSR=" << flagsBuf << " MODE=" << modeStr;
+    *traceFile << "\n";
+
+    traceLastFlags = flagsAndMode;
+    traceHasPrevious = true;
+
+    traceLineCount++;
+    if (traceMaxLines > 0 && traceLineCount >= traceMaxLines)
+    {
+        *traceFile << "; trace line cap (" << traceMaxLines << ") reached, tracing auto-stopped\n";
+        DisableTracing();
+        return;
+    }
+
+    if ((traceLineCount & 0xFF) == 0)
+        traceFile->flush();
 }
 
 uint32_t ARM7TDMI::Read32()
@@ -404,6 +576,55 @@ void ARM7TDMI::flushPipeline()
     }
 }
 
+bool ARM7TDMI::InterruptPending()
+{
+    uint16_t ie = memoryBus->read16Raw(0x04000200);
+    uint16_t irqFlags = memoryBus->read16Raw(0x04000202);
+    uint8_t ime = memoryBus->read8Raw(0x04000208);
+
+    if (!(ime & 0x1))
+        return false;
+    if (registers->GetProgramStatusRegister().GetIRQDisable())
+        return false;
+
+    return (ie & irqFlags) != 0;
+}
+
+void ARM7TDMI::EnterException(CPUMode mode, uint32_t vectorAddress, uint32_t returnAddress)
+{
+    uint32_t oldCpsr = registers->GetProgramStatusRegister().GetValue();
+
+    registers->GetProgramStatusRegister().SetMode(mode);
+    registers->GetSavedProgramStatusRegister().SetValue(oldCpsr);
+    *registers->GetRegister(LINK_REGISTER) = returnAddress;
+
+    registers->GetProgramStatusRegister().SetThumbState(false);
+    registers->GetProgramStatusRegister().SetIRQDisable(true);
+
+    *registers->GetRegister(PROGRAM_COUNTER) = vectorAddress;
+    flushPipeline();
+}
+
+void ARM7TDMI::EnterInterrupt()
+{
+    uint32_t pc = *registers->GetRegister(PROGRAM_COUNTER);
+    bool wasThumb = registers->GetProgramStatusRegister().GetThumbState();
+    //LR needs nextInstr+4, arm's pipelined PC is 4 short of that, thumb's isn't
+    uint32_t returnAddress = wasThumb ? pc : (pc - 4);
+    EnterException(IRQ, 0x18, returnAddress);
+}
+
+void ARM7TDMI::HandleDataProcessingPCWrite(uint8_t destinationRegister, bool setConditionCodes)
+{
+    if (destinationRegister != PROGRAM_COUNTER)
+        return;
+
+    if (setConditionCodes)
+        registers->GetProgramStatusRegister().SetValue(registers->GetSavedProgramStatusRegister().GetValue());
+
+    flushPipeline();
+}
+
 bool ARM7TDMI::IsValueNegative(uint32_t Value)
 {
     return (Value >> 31) & 1;
@@ -566,16 +787,66 @@ void ARM7TDMI::armDataProcessing(uint32_t instruction)
     {
     case 0b0000:
         //AND
-        throw std::runtime_error("Data Processing opcode AND (0000) not implemented.");
+        {
+            uint32_t result = Operand1 & Operand2;
+            *registers->GetRegister(DestinationRegister) = result;
+
+            if (setConditionCodes)
+            {
+                registers->GetProgramStatusRegister().SetZero(IsValueZero(result));
+                registers->GetProgramStatusRegister().SetNegative(IsValueNegative(result));
+                registers->GetProgramStatusRegister().SetCarry(shiftCarry);
+            }
+            HandleDataProcessingPCWrite(DestinationRegister, setConditionCodes);
+            return;
+        }
     case 0b0001:
         //EOR
-        throw std::runtime_error("Data Processing opcode EOR (0001) not implemented.");
+        {
+            uint32_t result = Operand1 ^ Operand2;
+            *registers->GetRegister(DestinationRegister) = result;
+
+            if (setConditionCodes)
+            {
+                registers->GetProgramStatusRegister().SetZero(IsValueZero(result));
+                registers->GetProgramStatusRegister().SetNegative(IsValueNegative(result));
+                registers->GetProgramStatusRegister().SetCarry(shiftCarry);
+            }
+            HandleDataProcessingPCWrite(DestinationRegister, setConditionCodes);
+            return;
+        }
     case 0b0010:
         //SUB
-        throw std::runtime_error("Data Processing opcode SUB (0010) not implemented.");
+        {
+            uint32_t result = Operand1 - Operand2;
+            *registers->GetRegister(DestinationRegister) = result;
+
+            if (setConditionCodes)
+            {
+                registers->GetProgramStatusRegister().SetZero(IsValueZero(result));
+                registers->GetProgramStatusRegister().SetNegative(IsValueNegative(result));
+                registers->GetProgramStatusRegister().SetCarry(IsCarrySubtraction(Operand1, Operand2));
+                registers->GetProgramStatusRegister().SetOverflow(IsOverflowSubtraction(Operand1, Operand2));
+            }
+            HandleDataProcessingPCWrite(DestinationRegister, setConditionCodes);
+            return;
+        }
     case 0b0011:
-        //RSB
-        throw std::runtime_error("Data Processing opcode RSB (0011) not implemented.");
+        //RSB (reverse subtract: Rd = Operand2 - Operand1)
+        {
+            uint32_t result = Operand2 - Operand1;
+            *registers->GetRegister(DestinationRegister) = result;
+
+            if (setConditionCodes)
+            {
+                registers->GetProgramStatusRegister().SetZero(IsValueZero(result));
+                registers->GetProgramStatusRegister().SetNegative(IsValueNegative(result));
+                registers->GetProgramStatusRegister().SetCarry(IsCarrySubtraction(Operand2, Operand1));
+                registers->GetProgramStatusRegister().SetOverflow(IsOverflowSubtraction(Operand2, Operand1));
+            }
+            HandleDataProcessingPCWrite(DestinationRegister, setConditionCodes);
+            return;
+        }
     case 0b0100:
         //ADD
         {
@@ -589,17 +860,65 @@ void ARM7TDMI::armDataProcessing(uint32_t instruction)
                 registers->GetProgramStatusRegister().SetCarry(IsCarryAddition(Operand1, Operand2));
                 registers->GetProgramStatusRegister().SetOverflow(IsOverflowAddition(Operand1, Operand2));
             }
+            HandleDataProcessingPCWrite(DestinationRegister, setConditionCodes);
             return;
         }
     case 0b0101:
-        //ADC
-        throw std::runtime_error("Data Processing opcode ADC (0101) not implemented.");
+        //ADC (Rd = Operand1 + Operand2 + Carry)
+        {
+            uint32_t carryIn = registers->GetProgramStatusRegister().GetCarry() ? 1 : 0;
+            uint64_t wideResult = static_cast<uint64_t>(Operand1) + Operand2 + carryIn;
+            uint32_t result = static_cast<uint32_t>(wideResult);
+            *registers->GetRegister(DestinationRegister) = result;
+
+            if (setConditionCodes)
+            {
+                registers->GetProgramStatusRegister().SetZero(IsValueZero(result));
+                registers->GetProgramStatusRegister().SetNegative(IsValueNegative(result));
+                registers->GetProgramStatusRegister().SetCarry(wideResult > 0xFFFFFFFFULL);
+                registers->GetProgramStatusRegister().SetOverflow(((Operand1 ^ result) & (Operand2 ^ result) & 0x80000000) != 0);
+            }
+            HandleDataProcessingPCWrite(DestinationRegister, setConditionCodes);
+            return;
+        }
     case 0b0110:
-        //SBC
-        throw std::runtime_error("Data Processing opcode SBC (0110) not implemented.");
+        //SBC (Rd = Operand1 - Operand2 - NOT(Carry), computed as Operand1 + ~Operand2 + Carry)
+        {
+            uint32_t carryIn = registers->GetProgramStatusRegister().GetCarry() ? 1 : 0;
+            uint32_t invertedOperand2 = ~Operand2;
+            uint64_t wideResult = static_cast<uint64_t>(Operand1) + invertedOperand2 + carryIn;
+            uint32_t result = static_cast<uint32_t>(wideResult);
+            *registers->GetRegister(DestinationRegister) = result;
+
+            if (setConditionCodes)
+            {
+                registers->GetProgramStatusRegister().SetZero(IsValueZero(result));
+                registers->GetProgramStatusRegister().SetNegative(IsValueNegative(result));
+                registers->GetProgramStatusRegister().SetCarry(wideResult > 0xFFFFFFFFULL);
+                registers->GetProgramStatusRegister().SetOverflow(((Operand1 ^ result) & (invertedOperand2 ^ result) & 0x80000000) != 0);
+            }
+            HandleDataProcessingPCWrite(DestinationRegister, setConditionCodes);
+            return;
+        }
     case 0b0111:
-        //RSC
-        throw std::runtime_error("Data Processing opcode RSC (0111) not implemented.");
+        //RSC (Rd = Operand2 - Operand1 - NOT(Carry), computed as Operand2 + ~Operand1 + Carry)
+        {
+            uint32_t carryIn = registers->GetProgramStatusRegister().GetCarry() ? 1 : 0;
+            uint32_t invertedOperand1 = ~Operand1;
+            uint64_t wideResult = static_cast<uint64_t>(Operand2) + invertedOperand1 + carryIn;
+            uint32_t result = static_cast<uint32_t>(wideResult);
+            *registers->GetRegister(DestinationRegister) = result;
+
+            if (setConditionCodes)
+            {
+                registers->GetProgramStatusRegister().SetZero(IsValueZero(result));
+                registers->GetProgramStatusRegister().SetNegative(IsValueNegative(result));
+                registers->GetProgramStatusRegister().SetCarry(wideResult > 0xFFFFFFFFULL);
+                registers->GetProgramStatusRegister().SetOverflow(((Operand2 ^ result) & (invertedOperand1 ^ result) & 0x80000000) != 0);
+            }
+            HandleDataProcessingPCWrite(DestinationRegister, setConditionCodes);
+            return;
+        }
     case 0b1000:
         //TST
         {
@@ -630,10 +949,29 @@ void ARM7TDMI::armDataProcessing(uint32_t instruction)
         }
     case 0b1011:
         //CMN
-        throw std::runtime_error("Data Processing opcode CMN (1011) not implemented.");
+        {
+            uint32_t result = Operand1 + Operand2;
+            registers->GetProgramStatusRegister().SetZero(IsValueZero(result));
+            registers->GetProgramStatusRegister().SetNegative(IsValueNegative(result));
+            registers->GetProgramStatusRegister().SetCarry(IsCarryAddition(Operand1, Operand2));
+            registers->GetProgramStatusRegister().SetOverflow(IsOverflowAddition(Operand1, Operand2));
+            return;
+        }
     case 0b1100:
         //ORR
-        throw std::runtime_error("Data Processing opcode ORR (1100) not implemented.");
+        {
+            uint32_t result = Operand1 | Operand2;
+            *registers->GetRegister(DestinationRegister) = result;
+
+            if (setConditionCodes)
+            {
+                registers->GetProgramStatusRegister().SetZero(IsValueZero(result));
+                registers->GetProgramStatusRegister().SetNegative(IsValueNegative(result));
+                registers->GetProgramStatusRegister().SetCarry(shiftCarry);
+            }
+            HandleDataProcessingPCWrite(DestinationRegister, setConditionCodes);
+            return;
+        }
     case 0b1101:
         //MOV
         {
@@ -644,6 +982,7 @@ void ARM7TDMI::armDataProcessing(uint32_t instruction)
                 registers->GetProgramStatusRegister().SetNegative(IsValueNegative(Operand2));
                 registers->GetProgramStatusRegister().SetCarry(shiftCarry);
             }
+            HandleDataProcessingPCWrite(DestinationRegister, setConditionCodes);
             return;
         }
     case 0b1110:
@@ -657,22 +996,89 @@ void ARM7TDMI::armDataProcessing(uint32_t instruction)
                 registers->GetProgramStatusRegister().SetNegative(IsValueNegative(result));
                 registers->GetProgramStatusRegister().SetCarry(shiftCarry);
             }
+            HandleDataProcessingPCWrite(DestinationRegister, setConditionCodes);
             return;
         }
     case 0b1111:
         //MVN
-        throw std::runtime_error("Data Processing opcode MVN (1111) not implemented.");
+        {
+            uint32_t result = ~Operand2;
+            *registers->GetRegister(DestinationRegister) = result;
+
+            if (setConditionCodes)
+            {
+                registers->GetProgramStatusRegister().SetZero(IsValueZero(result));
+                registers->GetProgramStatusRegister().SetNegative(IsValueNegative(result));
+                registers->GetProgramStatusRegister().SetCarry(shiftCarry);
+            }
+            HandleDataProcessingPCWrite(DestinationRegister, setConditionCodes);
+            return;
+        }
     }
 }
 
 void ARM7TDMI::armMultiply(uint32_t instruction)
 {
-    throw std::runtime_error("ARM instruction MUL not implemented.");
+    bool accumulate = (instruction >> 21) & 0x1;
+    bool setConditionCodes = (instruction >> 20) & 0x1;
+
+    uint8_t destinationRegister = (instruction >> 16) & 0xF;
+    uint8_t accumulateRegister = (instruction >> 12) & 0xF;
+    uint8_t operandRegisterS = (instruction >> 8) & 0xF;
+    uint8_t operandRegisterM = instruction & 0xF;
+
+    uint32_t result = *registers->GetRegister(operandRegisterM) * *registers->GetRegister(operandRegisterS);
+
+    if (accumulate)
+        result += *registers->GetRegister(accumulateRegister);
+
+    *registers->GetRegister(destinationRegister) = result;
+
+    if (setConditionCodes)
+    {
+        registers->GetProgramStatusRegister().SetZero(IsValueZero(result));
+        registers->GetProgramStatusRegister().SetNegative(IsValueNegative(result));
+        //carry unchanged, undefined after MUL/MLA
+    }
 }
 
 void ARM7TDMI::armMultiplyLong(uint32_t instruction)
 {
-    throw std::runtime_error("ARM instruction MULL/MLAL not implemented.");
+    bool signedOp = (instruction >> 22) & 0x1;
+    bool accumulate = (instruction >> 21) & 0x1;
+    bool setConditionCodes = (instruction >> 20) & 0x1;
+
+    uint8_t highRegister = (instruction >> 16) & 0xF;
+    uint8_t lowRegister = (instruction >> 12) & 0xF;
+    uint8_t operandRegisterS = (instruction >> 8) & 0xF;
+    uint8_t operandRegisterM = instruction & 0xF;
+
+    uint32_t valueM = *registers->GetRegister(operandRegisterM);
+    uint32_t valueS = *registers->GetRegister(operandRegisterS);
+
+    uint64_t product;
+    if (signedOp)
+        product = static_cast<uint64_t>(
+            static_cast<int64_t>(static_cast<int32_t>(valueM)) * static_cast<int64_t>(static_cast<int32_t>(valueS)));
+    else
+        product = static_cast<uint64_t>(valueM) * static_cast<uint64_t>(valueS);
+
+    if (accumulate)
+    {
+        uint64_t existing = (static_cast<uint64_t>(*registers->GetRegister(highRegister)) << 32)
+            | static_cast<uint64_t>(*registers->GetRegister(lowRegister));
+        product += existing;
+    }
+
+    *registers->GetRegister(lowRegister) = static_cast<uint32_t>(product);
+    *registers->GetRegister(highRegister) = static_cast<uint32_t>(product >> 32);
+
+    if (setConditionCodes)
+    {
+        registers->GetProgramStatusRegister().SetZero(product == 0);
+        registers->GetProgramStatusRegister().SetNegative((product >> 63) & 1);
+        //carry and overflow unchanged, undefined after MULL/MLAL
+    }
 }
 
 void ARM7TDMI::armSingleDataSwap(uint32_t instruction)
@@ -706,7 +1112,66 @@ void ARM7TDMI::armBranchExchange(uint32_t instruction)
 
 void ARM7TDMI::armHalfwordDataTransfer(uint32_t instruction)
 {
-    throw std::runtime_error("ARM instruction halfword data transfer (LDRH/STRH/LDRSB/LDRSH) not implemented.");
+    bool preIndex = (instruction >> 24) & 0x1;
+    bool upDown = (instruction >> 23) & 0x1;
+    bool immediateOffset = (instruction >> 22) & 0x1;
+    bool writeBack = (instruction >> 21) & 0x1;
+    bool loadMemory = (instruction >> 20) & 0x1;
+
+    uint8_t baseRegister = (instruction >> 16) & 0xF;
+    uint8_t destinationRegister = (instruction >> 12) & 0xF;
+    uint8_t sh = (instruction >> 5) & 0x3;
+
+    uint32_t offset;
+    if (immediateOffset)
+    {
+        offset = ((instruction >> 4) & 0xF0) | (instruction & 0xF);
+    }
+    else
+    {
+        uint8_t rm = instruction & 0xF;
+        offset = *registers->GetRegister(rm);
+    }
+
+    if (!upDown) offset *= -1;
+
+    uint32_t baseValue = *registers->GetRegister(baseRegister);
+    uint32_t address = baseValue + (preIndex ? offset : 0);
+
+    if (loadMemory)
+    {
+        uint32_t value;
+        switch (sh)
+        {
+        case 0b01: //LDRH
+            value = memoryBus->read16(address);
+            break;
+        case 0b10: //LDRSB
+            value = static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(memoryBus->read8(address))));
+            break;
+        case 0b11: //LDRSH
+            value = static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(memoryBus->read16(address))));
+            break;
+        default:
+            throw std::runtime_error("Invalid halfword data transfer SH field for load: " + std::to_string(sh));
+        }
+        *registers->GetRegister(destinationRegister) = value;
+    }
+    else
+    {
+        //STRH
+        memoryBus->write16(address, static_cast<uint16_t>(*registers->GetRegister(destinationRegister)));
+    }
+
+    // Same post-index-always-writes-back rule as armSingleDataTransfer.
+    if (!preIndex)
+    {
+        *registers->GetRegister(baseRegister) = baseValue + offset;
+    }
+    else if (writeBack)
+    {
+        *registers->GetRegister(baseRegister) = address;
+    }
 }
 
 //LDR/STR
@@ -741,21 +1206,29 @@ void ARM7TDMI::armSingleDataTransfer(uint32_t instruction)
 
     if (!upDown) offset *= -1;
 
+    uint32_t baseValue = *registers->GetRegister(baseRegister);
+
     //LDR
-    uint32_t address = *registers->GetRegister(baseRegister) + (prePostIndex ? offset : 0);
+    uint32_t address = baseValue + (prePostIndex ? offset : 0);
     if (loadMemory)
     {
         if (!byteWord)
         {
             uint32_t word = LoadWord(address);
-            
+
             *registers->GetRegister(destinationRegister) = word;
         }
         else
         {
             uint8_t byte = memoryBus->read8(address);
-            
+
             *registers->GetRegister(destinationRegister) = (uint32_t)byte;
+        }
+        
+        if (destinationRegister == PROGRAM_COUNTER)
+        {
+            *registers->GetRegister(PROGRAM_COUNTER) &= ~static_cast<uint32_t>(3);
+            flushPipeline();
         }
     }
     //STR
@@ -770,8 +1243,12 @@ void ARM7TDMI::armSingleDataTransfer(uint32_t instruction)
             memoryBus->write8(address, (uint8_t)*registers->GetRegister(destinationRegister));
         }
     }
-
-    if (writeBack)
+    
+    if (!prePostIndex)
+    {
+        *registers->GetRegister(baseRegister) = baseValue + offset;
+    }
+    else if (writeBack)
     {
         *registers->GetRegister(baseRegister) = address;
     }
@@ -807,6 +1284,10 @@ void ARM7TDMI::armBlockDataTransfer(uint32_t instruction)
     if (!UpBit)
     {
         CurrentAddress -= 4 * registerCount;
+        //post decrement covers base minus count plus four up to base, one word above
+        //where pre decrement sits, so shift the whole run up when PreIndex is clear
+        if (!PreIndex)
+            CurrentAddress += 4;
     }
 
     //loop through all possible registers at the start of the instruction, this is the register list
@@ -824,9 +1305,11 @@ void ARM7TDMI::armBlockDataTransfer(uint32_t instruction)
                 uint32_t value = memoryBus->read32(CurrentAddress);
                 *registers->GetRegister(i, ForcedMode) = value;
 
-                //if we're loading PC, we need to flush pipeline
+                //if we're loading PC, mask to word alignment (LDM doesn't interwork on
+                //ARMv4T - only BX/BLX switch state) and flush the pipeline
                 if (i == 15)
                 {
+                    *registers->GetRegister(PROGRAM_COUNTER) &= ~static_cast<uint32_t>(3);
                     flushPipeline();
                 }
             }
@@ -844,8 +1327,12 @@ void ARM7TDMI::armBlockDataTransfer(uint32_t instruction)
         }
     }
 
+    //a load that names the base in its own register list keeps the loaded value, the
+    //writeback is dropped rather than overwriting it
+    const bool baseWasLoaded = bIsLoad && (instruction & (1 << Rn)) != 0;
+
     //if writeback bit is set, we need to set the final address to the register that was used for the initial address
-    if (WriteBack)
+    if (WriteBack && !baseWasLoaded)
     {
         if (UpBit)
             *registers->GetRegister(Rn) = CurrentAddress;
@@ -913,7 +1400,10 @@ void ARM7TDMI::armCoprocessorRegisterTransfer(uint32_t instruction)
 
 void ARM7TDMI::armSoftwareInterrupt(uint32_t instruction)
 {
-    throw std::runtime_error("ARM instruction SWI not implemented.");
+    uint32_t pc = *registers->GetRegister(PROGRAM_COUNTER);
+    //arm's pipelined PC is nextInstr+4, SWI's return needs no further offset
+    uint32_t returnAddress = pc - 4;
+    EnterException(Supervisor, 0x08, returnAddress);
 }
 
 void ARM7TDMI::armUndefined(uint32_t instruction)
@@ -986,46 +1476,25 @@ void ARM7TDMI::thumbMoveShiftedRegister(uint16_t instruction)
     uint8_t SourceRegisterNum = (instruction >> 3) & 0x7;
     uint8_t DestinationRegisterNum = instruction & 0x7;
 
+    if (OpCode > 2)
+        throw std::runtime_error("Invalid Thumb Move Shifted Register opcode: " + std::to_string(OpCode));
+
     uint32_t* SourceRegister = registers->GetRegister(SourceRegisterNum);
     uint32_t* DestinationRegister = registers->GetRegister(DestinationRegisterNum);
 
-    switch (OpCode)
-    {
-    case 0:
-        {
-            //LSL
-            uint32_t value = *SourceRegister;
-            if (Offset < 32 && Offset > 0)
-                registers->GetProgramStatusRegister().SetCarry((value >> (32 - Offset)) & 1);
-            else if (Offset == 32)
-                registers->GetProgramStatusRegister().SetCarry(value & 1);
-            else if (Offset > 0)
-                registers->GetProgramStatusRegister().SetCarry(false);
-            
-            value = value << Offset;
-            *DestinationRegister = value;
-            
-            break;
-        }
-    case 1:
-        {
-            //LSR
-            uint32_t value = *SourceRegister;
-            value = value >> Offset;
-            *DestinationRegister = value;
-            break;
-        }
-    case 2:
-        {
-            //ASR
-            int32_t value = static_cast<int32_t>(*SourceRegister);
-            value = value >> Offset;
-            *DestinationRegister = static_cast<uint32_t>(value);
-            break;
-        }
-    default:
-        throw std::runtime_error("Invalid Thumb Move Shifted Register opcode: " + std::to_string(OpCode));
-    }
+    //0 means 32
+    uint8_t shiftAmount = (Offset == 0 && OpCode != 0) ? 32 : Offset;
+
+    bool carry = false;
+    uint32_t value = ApplyShift(*SourceRegister, OpCode, shiftAmount, carry);
+    *DestinationRegister = value;
+
+    //always updates N Z C here, no S-bit like ARM shifts
+    registers->GetProgramStatusRegister().SetZero(IsValueZero(value));
+    registers->GetProgramStatusRegister().SetNegative(IsValueNegative(value));
+    //LSL #0 does no shift, carry stays unchanged
+    if (!(OpCode == 0 && Offset == 0))
+        registers->GetProgramStatusRegister().SetCarry(carry);
 }
 
 void ARM7TDMI::thumbAddSubtract(uint16_t instruction)
@@ -1183,25 +1652,30 @@ void ARM7TDMI::thumbALUOperations(uint16_t instruction)
     case 0b0101:
         {
             //ADC
-            uint32_t CarryAdd = registers->GetProgramStatusRegister().GetCarry() ? 1 : 0;
-            uint32_t Result = DestinationValue + SourceValue + CarryAdd;
+            //ADC, carried out in 64 bits so a carry into the sum cannot be lost when
+            //SourceValue is already 0xFFFFFFFF
+            uint32_t carryIn = registers->GetProgramStatusRegister().GetCarry() ? 1 : 0;
+            uint64_t wideResult = static_cast<uint64_t>(DestinationValue) + SourceValue + carryIn;
+            uint32_t Result = static_cast<uint32_t>(wideResult);
             *registers->GetRegister(Rd) = Result;
             registers->GetProgramStatusRegister().SetZero(IsValueZero(Result));
             registers->GetProgramStatusRegister().SetNegative(IsValueNegative(Result));
-            registers->GetProgramStatusRegister().SetCarry(IsCarryAddition(DestinationValue, SourceValue + CarryAdd));
-            registers->GetProgramStatusRegister().SetOverflow(IsOverflowAddition(DestinationValue, SourceValue + CarryAdd));
+            registers->GetProgramStatusRegister().SetCarry(wideResult > 0xFFFFFFFFULL);
+            registers->GetProgramStatusRegister().SetOverflow(((DestinationValue ^ Result) & (SourceValue ^ Result) & 0x80000000) != 0);
             break;
         }
     case 0b0110:
         {
-            //SBC
-            uint32_t CarrySub = ~(registers->GetProgramStatusRegister().GetCarry() ? 1 : 0);
-            uint32_t Result = DestinationValue - SourceValue - CarrySub;
+            //SBC, Rd = Rd - Rs - NOT(Carry), computed as Rd + ~Rs + Carry like the ARM form
+            uint32_t carryIn = registers->GetProgramStatusRegister().GetCarry() ? 1 : 0;
+            uint32_t invertedSource = ~SourceValue;
+            uint64_t wideResult = static_cast<uint64_t>(DestinationValue) + invertedSource + carryIn;
+            uint32_t Result = static_cast<uint32_t>(wideResult);
             *registers->GetRegister(Rd) = Result;
             registers->GetProgramStatusRegister().SetZero(IsValueZero(Result));
             registers->GetProgramStatusRegister().SetNegative(IsValueNegative(Result));
-            registers->GetProgramStatusRegister().SetCarry(IsCarrySubtraction(DestinationValue, SourceValue - CarrySub));
-            registers->GetProgramStatusRegister().SetOverflow(IsOverflowSubtraction(DestinationValue, SourceValue - CarrySub));
+            registers->GetProgramStatusRegister().SetCarry(wideResult > 0xFFFFFFFFULL);
+            registers->GetProgramStatusRegister().SetOverflow(((DestinationValue ^ Result) & (invertedSource ^ Result) & 0x80000000) != 0);
             break;
         }
     case 0b0111:
@@ -1312,6 +1786,12 @@ void ARM7TDMI::thumbHiRegisterOperations(uint16_t instruction)
         {
                 //ADD
                 *registers->GetRegister(RdMasked) += *registers->GetRegister(RsMasked);
+                if (RdMasked == PROGRAM_COUNTER)
+                {
+                    //PC writes here never change Thumb state, unlike BX
+                    *registers->GetRegister(PROGRAM_COUNTER) &= ~0x1u;
+                    flushPipeline();
+                }
                 break;
         }
         case 0x01:
@@ -1319,7 +1799,7 @@ void ARM7TDMI::thumbHiRegisterOperations(uint16_t instruction)
                 //CMP
                 uint32_t op1 = *registers->GetRegister(RdMasked);
                 uint32_t op2 = *registers->GetRegister(RsMasked);
-                uint32_t result = op1 + op2;
+                uint32_t result = op1 - op2;
                 registers->GetProgramStatusRegister().SetZero(IsValueZero(result));
                 registers->GetProgramStatusRegister().SetNegative(IsValueNegative(result));
                 registers->GetProgramStatusRegister().SetCarry(IsCarrySubtraction(op1, op2));
@@ -1330,6 +1810,11 @@ void ARM7TDMI::thumbHiRegisterOperations(uint16_t instruction)
         {
                 //MOV
                 *registers->GetRegister(RdMasked) = *registers->GetRegister(RsMasked);
+                if (RdMasked == PROGRAM_COUNTER)
+                {
+                    *registers->GetRegister(PROGRAM_COUNTER) &= ~0x1u;
+                    flushPipeline();
+                }
                 break;
         }
         case 0x03:
@@ -1557,7 +2042,25 @@ void ARM7TDMI::thumbSPRelativeLoadStore(uint16_t instruction)
 
 void ARM7TDMI::thumbLoadAddress(uint16_t instruction)
 {
-    throw std::runtime_error("Thumb instruction load address (ADD Rd, PC/SP) not implemented.");
+    bool useStackPointer = (instruction >> 11) & 0x1;
+    uint8_t destinationRegister = (instruction >> 8) & 0x7;
+    uint8_t word8 = instruction & 0xFF;
+
+    //Word8 is stored as Offset >> 2
+    uint32_t offset = word8 * 4;
+
+    uint32_t baseValue;
+    if (useStackPointer)
+    {
+        baseValue = *registers->GetRegister(STACK_POINTER);
+    }
+    else
+    {
+        //read pc aligned to word, matching thumbPCRelativeLoad's convention
+        baseValue = *registers->GetRegister(PROGRAM_COUNTER) & ~3;
+    }
+
+    *registers->GetRegister(destinationRegister) = baseValue + offset;
 }
 
 void ARM7TDMI::thumbAddOffsetToSP(uint16_t instruction)
@@ -1607,7 +2110,9 @@ void ARM7TDMI::thumbPushPopRegisters(uint16_t instruction)
 
         if (R)
         {
-            *registers->GetRegister(PROGRAM_COUNTER) = memoryBus->read32(*registers->GetRegister(STACK_POINTER));
+            //#mask
+            uint32_t returnAddress = memoryBus->read32(*registers->GetRegister(STACK_POINTER));
+            *registers->GetRegister(PROGRAM_COUNTER) = returnAddress & ~1u;
             *registers->GetRegister(STACK_POINTER) += 4;
             flushPipeline();
         }
@@ -1615,6 +2120,12 @@ void ARM7TDMI::thumbPushPopRegisters(uint16_t instruction)
     //PUSH
     else
     {
+        if (R)
+        {
+            *registers->GetRegister(STACK_POINTER) -= 4;
+            memoryBus->write32(*registers->GetRegister(STACK_POINTER), *registers->GetRegister(LINK_REGISTER));
+        }
+
         //store from highest bit first, R7, so loop backward
         for (int i = 7; i >= 0; i--)
         {
@@ -1626,18 +2137,50 @@ void ARM7TDMI::thumbPushPopRegisters(uint16_t instruction)
                 memoryBus->write32(*registers->GetRegister(STACK_POINTER), *registers->GetRegister(i));
             }
         }
-
-        if (R)
-        {
-            *registers->GetRegister(STACK_POINTER) -= 4;
-            memoryBus->write32(*registers->GetRegister(STACK_POINTER), *registers->GetRegister(LINK_REGISTER));
-        }
     }
 }
 
 void ARM7TDMI::thumbMultipleLoadStore(uint16_t instruction)
 {
-    throw std::runtime_error("Thumb instruction multiple load/store (LDMIA/STMIA) not implemented.");
+    //Store or Load
+    bool bIsLoad = (instruction >> 11) & 0x1;
+    //base register
+    uint8_t Rb = (instruction >> 8) & 0x7;
+    //list of registers to load/store starts at bit 0. 1 bit for each register from R0 to R7
+    uint8_t RegisterList = instruction & 0xFF;
+
+    uint32_t Address = *registers->GetRegister(Rb);
+
+    if (bIsLoad)
+    {
+        //LDMIA
+        for (int i = 0; i <= 7; i++)
+        {
+            if (RegisterList & (1 << i))
+            {
+                *registers->GetRegister(i) = memoryBus->read32(Address);
+                Address += 4;
+            }
+        }
+    }
+    else
+    {
+        //STMIA
+        for (int i = 0; i <= 7; i++)
+        {
+            if (RegisterList & (1 << i))
+            {
+                memoryBus->write32(Address, *registers->GetRegister(i));
+                Address += 4;
+            }
+        }
+    }
+
+    //write back addr
+    if (!bIsLoad || !(RegisterList & (1 << Rb)))
+    {
+        *registers->GetRegister(Rb) = Address;
+    }
 }
 
 void ARM7TDMI::thumbConditionalBranch(uint16_t instruction)
@@ -1655,14 +2198,20 @@ void ARM7TDMI::thumbConditionalBranch(uint16_t instruction)
 
 void ARM7TDMI::thumbSoftwareInterrupt(uint16_t instruction)
 {
-    throw std::runtime_error("Thumb instruction SWI not implemented.");
+    uint32_t pc = *registers->GetRegister(PROGRAM_COUNTER);
+    //thumb's pipelined PC is nextInstr+2, SWI's return needs no further offset
+    uint32_t returnAddress = pc - 2;
+    EnterException(Supervisor, 0x08, returnAddress);
 }
 
 void ARM7TDMI::thumbUnconditionalBranch(uint16_t instruction)
 {
     uint16_t Offset11 = instruction & 0x7FF;
-    //offset is stored as Offset11 = Offset >> 1, to save a bit, restore bit with << 1
-    uint16_t Offset = Offset11 << 1;
+    
+    int32_t SignedOffset11 = (Offset11 & 0x400)
+        ? static_cast<int32_t>(Offset11 | 0xFFFFF800)
+        : static_cast<int32_t>(Offset11);
+    int32_t Offset = SignedOffset11 << 1;
 
     *registers->GetRegister(PROGRAM_COUNTER) += Offset;
     flushPipeline();

@@ -2,22 +2,41 @@
 #include "EmulatorApp.h"
 #include "RegisterFrame.h"
 #include "MemoryViewerFrame.h"
+#include "InputSettingsDialog.h"
+#include <algorithm>
 #include <fstream>
 #include <vector>
+#include <wx/config.h>
+#include <wx/filename.h>
+#include <wx/stdpaths.h>
+#define NOMINMAX
+#include <Windows.h>
+#pragma comment(lib, "Winmm.lib")
+
+namespace {
+    const wxString kBiosPathConfigKey = "/LastBiosPath";
+    const wxString kRomPathConfigKey = "/LastRomPath";
+}
 
 enum {
     ID_LoadBIOS = wxID_HIGHEST + 1,
+    ID_UnloadROM,
     ID_Step,
     ID_Run,
     ID_Pause,
     ID_Reset,
     ID_ShowRegisters,
     ID_ShowMemory,
-    ID_FrameTimer
+    ID_ToggleTrace,
+    ID_DumpPPUState,
+    ID_DumpFrameImage,
+    ID_ToggleFpsCounter,
+    ID_ConfigureInput
 };
 
 wxBEGIN_EVENT_TABLE(EmulatorFrame, wxFrame)
     EVT_MENU(wxID_OPEN, EmulatorFrame::OnOpen)
+    EVT_MENU(ID_UnloadROM, EmulatorFrame::OnUnloadROM)
     EVT_MENU(ID_LoadBIOS, EmulatorFrame::OnLoadBIOS)
     EVT_MENU(wxID_EXIT, EmulatorFrame::OnExit)
     EVT_MENU(ID_Step, EmulatorFrame::OnStep)
@@ -26,11 +45,17 @@ wxBEGIN_EVENT_TABLE(EmulatorFrame, wxFrame)
     EVT_MENU(ID_Reset, EmulatorFrame::OnReset)
     EVT_MENU(ID_ShowRegisters, EmulatorFrame::OnShowRegisters)
     EVT_MENU(ID_ShowMemory, EmulatorFrame::OnShowMemory)
-    EVT_TIMER(ID_FrameTimer, EmulatorFrame::OnTimer)
-    EVT_IDLE(EmulatorFrame::OnIdle)
+    EVT_MENU(ID_ToggleTrace, EmulatorFrame::OnToggleTrace)
+    EVT_MENU(ID_DumpPPUState, EmulatorFrame::OnDumpPPUState)
+    EVT_MENU(ID_DumpFrameImage, EmulatorFrame::OnDumpFrameImage)
+    EVT_MENU(ID_ToggleFpsCounter, EmulatorFrame::OnToggleFpsCounter)
+    EVT_MENU(ID_ConfigureInput, EmulatorFrame::OnConfigureInput)
 wxEND_EVENT_TABLE()
 
 bool EmulatorApp::OnInit() {
+    SetAppName("GBAPlusPlus");
+    SetVendorName("GBAPlusPlus");
+
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         wxLogError("SDL_Init failed: %s", SDL_GetError());
         return false;
@@ -64,14 +89,16 @@ EmulatorFrame::EmulatorFrame()
     , isPaused(false)
     , biosLoaded(false)
     , romLoaded(false)
-    , accumulator(0.0)
 {
+    inputMap.LoadFromConfig();
+
     // Menu bar
     wxMenuBar* menuBar = new wxMenuBar();
 
     wxMenu* fileMenu = new wxMenu();
     fileMenu->Append(ID_LoadBIOS, "Load &BIOS...\tCtrl-B", "Load GBA BIOS file");
     fileMenu->Append(wxID_OPEN, "&Open ROM...\tCtrl-O", "Load GBA ROM file");
+    fileMenu->Append(ID_UnloadROM, "&Unload ROM\tCtrl-Shift-U", "Eject the cartridge and return to BIOS-only");
     fileMenu->AppendSeparator();
     fileMenu->Append(wxID_EXIT, "E&xit\tAlt-F4", "Exit the emulator");
     menuBar->Append(fileMenu, "&File");
@@ -82,11 +109,27 @@ EmulatorFrame::EmulatorFrame()
     emuMenu->Append(ID_Pause, "&Pause\tF6",      "Pause emulation");
     emuMenu->AppendSeparator();
     emuMenu->Append(ID_Reset, "R&eset\tCtrl-R", "Reset emulator");
+    emuMenu->AppendSeparator();
+    emuMenu->Append(ID_ConfigureInput, "Configure &Input...\tCtrl-I",
+        "Choose which keys drive the GBA buttons");
     menuBar->Append(emuMenu, "&Emulation");
+
+    wxMenu* viewMenu = new wxMenu();
+    wxMenuItem* fpsCounterItem = viewMenu->AppendCheckItem(ID_ToggleFpsCounter, "Show &FPS Counter",
+        "Overlay the current framerate in the top-right corner of the display");
+    fpsCounterItem->Check(true);
+    menuBar->Append(viewMenu, "&View");
 
     wxMenu* debugMenu = new wxMenu();
     debugMenu->Append(ID_ShowRegisters, "Show &Registers\tCtrl-Shift-R", "Show register window");
     debugMenu->Append(ID_ShowMemory,    "Show &Memory\tCtrl-Shift-M",    "Show memory viewer");
+    debugMenu->AppendSeparator();
+    debugMenu->Append(ID_ToggleTrace, "Start Instruction &Trace...\tCtrl-Shift-T",
+        "Record an address/opcode/register trace to a file for comparison against a reference");
+    debugMenu->Append(ID_DumpPPUState, "Dump &PPU/OAM State\tCtrl-Shift-P",
+        "Write DISPCNT/window/BG registers and OAM sprite entries to a text file");
+    debugMenu->Append(ID_DumpFrameImage, "Dump Frame as &Image\tCtrl-Shift-I",
+        "Save the current rendered frame as a BMP for visual inspection");
     menuBar->Append(debugMenu, "&Debug");
 
     SetMenuBar(menuBar);
@@ -115,18 +158,28 @@ EmulatorFrame::EmulatorFrame()
 
     mainPanel->SetSizer(mainSizer);
 
-    frameTimer = new wxTimer(this, ID_FrameTimer);
-
     InitializeEmulator();
 
-    lastFrameTime = std::chrono::high_resolution_clock::now();
+    wxString savedBiosPath, savedRomPath;
+    wxConfigBase* config = wxConfigBase::Get();
+    bool haveBios = config->Read(kBiosPathConfigKey, &savedBiosPath) && wxFileExists(savedBiosPath);
+    bool haveRom  = config->Read(kRomPathConfigKey, &savedRomPath) && wxFileExists(savedRomPath);
+
+    if (haveBios)
+        LoadBIOSFile(savedBiosPath);
+    if (haveRom)
+        LoadROMFile(savedRomPath);
 }
 
 EmulatorFrame::~EmulatorFrame() {
-    if (frameTimer->IsRunning())
-        frameTimer->Stop();
-    delete frameTimer;
-    
+    //must be first: lets any already-queued CallAfter callback (from the last
+    //loop iteration before stopRequested was observed) detect we're gone
+    aliveFlag->store(false);
+
+    stopRequested = true;
+    if (emuThread.joinable())
+        emuThread.join();
+
     registerWindow = nullptr;
     memoryWindow   = nullptr;
 
@@ -144,7 +197,15 @@ void EmulatorFrame::InitializeEmulator() {
     memoryBus = new MemoryBus();
     cpu = new ARM7TDMI(memoryBus, registers);
 
-    wxLogMessage("Emulator initialized");
+    sdlPanel->SetSource(memoryBus, &emuMutex);
+
+    wxString perfLogPath = wxStandardPaths::Get().GetDocumentsDir()
+        + wxFileName::GetPathSeparator() + "gbaplusplus_perf.log";
+    perfLog.open(perfLogPath.ToStdString(), std::ios::out | std::ios::trunc);
+    if (perfLog.is_open())
+        perfLog << "budget per frame = " << (FRAME_TIME * 1000.0) << "ms ("
+                << CYCLES_PER_FRAME << " cycles @ " << TARGET_FPS << " fps)\n";
+    perfWindowStart = std::chrono::steady_clock::now();
 }
 
 void EmulatorFrame::OnLoadBIOS(wxCommandEvent& event) {
@@ -172,15 +233,14 @@ void EmulatorFrame::LoadBIOSFile(const wxString& path) {
 
     std::vector<uint8_t> buffer(size);
     if (file.read(reinterpret_cast<char*>(buffer.data()), size)) {
-        memoryBus->loadBIOS(buffer.data(), size);
-        biosLoaded = true;
-        SetStatusText("BIOS loaded: " + path, 0);
-        wxLogMessage("BIOS loaded successfully (%d bytes)", (int)size);
-
-        if (romLoaded) {
-            cpu->InitializeCpuForExecution();
-            SetStatusText("Ready to run", 0);
+        {
+            std::lock_guard<std::mutex> lock(emuMutex);
+            memoryBus->loadBIOS(buffer.data(), size);
         }
+        biosLoaded = true;
+        wxConfigBase::Get()->Write(kBiosPathConfigKey, path);
+        ResetEmulatorState();
+        SetStatusText("BIOS loaded: " + path, 0);
     } else {
         wxMessageBox("Failed to read BIOS file", "Error", wxICON_ERROR);
     }
@@ -206,13 +266,15 @@ void EmulatorFrame::LoadROMFile(const wxString& path) {
 
     std::vector<uint8_t> buffer(size);
     if (file.read(reinterpret_cast<char*>(buffer.data()), size)) {
-        memoryBus->loadROM(buffer.data(), size);
+        {
+            std::lock_guard<std::mutex> lock(emuMutex);
+            memoryBus->loadROM(buffer.data(), size);
+        }
         romLoaded = true;
+        wxConfigBase::Get()->Write(kRomPathConfigKey, path);
         SetStatusText("ROM loaded: " + path, 0);
-        wxLogMessage("ROM loaded successfully (%d bytes)", (int)size);
-
         if (biosLoaded) {
-            cpu->InitializeCpuForExecution();
+            ResetEmulatorState();
             SetStatusText("Ready to run", 0);
         } else {
             SetStatusText("Load BIOS to continue", 0);
@@ -222,75 +284,118 @@ void EmulatorFrame::LoadROMFile(const wxString& path) {
     }
 }
 
+void EmulatorFrame::OnUnloadROM(wxCommandEvent& event) {
+    if (!romLoaded) return;
+
+    if (isRunning) {
+        stopRequested = true;
+        if (emuThread.joinable())
+            emuThread.join();
+        isRunning = false;
+        isPaused = false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(emuMutex);
+        memoryBus->unloadROM();
+    }
+    romLoaded = false;
+    wxConfigBase::Get()->DeleteEntry(kRomPathConfigKey);
+
+    ResetEmulatorState();
+    SetStatusText("ROM unloaded - running BIOS only", 0);
+    SetStatusText("Stopped", 1);
+    UpdateDebugWindows();
+}
+
 void EmulatorFrame::OnExit(wxCommandEvent& event) {
     Close(true);
 }
 
 void EmulatorFrame::OnStep(wxCommandEvent& event) {
-    if (!biosLoaded || !romLoaded) {
-        wxMessageBox("Please load BIOS and ROM first", "Not Ready", wxICON_WARNING);
+    if (!biosLoaded) {
+        wxMessageBox("Please load a BIOS first", "Not Ready", wxICON_WARNING);
         return;
     }
+    if (isRunning) return; // use Pause before single-stepping
+
     if (cpu) {
+        uint32_t pc;
         try
         {
+            std::lock_guard<std::mutex> lock(emuMutex);
             cpu->runCpuStep();
+            pc = *registers->GetRegister(PROGRAM_COUNTER);
         }
         catch (const std::exception& e)
         {
-            isRunning = false;
-            frameTimer->Stop();
             wxMessageBox(e.what(), "CPU Error", wxICON_ERROR);
+            return;
         }
         UpdateDebugWindows();
-        SetStatusText(wxString::Format("PC: 0x%08X",
-            *registers->GetRegister(PROGRAM_COUNTER)), 1);
+        SetStatusText(wxString::Format("PC: 0x%08X", pc), 1);
     }
 }
 
 void EmulatorFrame::OnRun(wxCommandEvent& event) {
-    if (!biosLoaded || !romLoaded) {
-        wxMessageBox("Please load BIOS and ROM first", "Not Ready", wxICON_WARNING);
+    if (!biosLoaded) {
+        wxMessageBox("Please load a BIOS first", "Not Ready", wxICON_WARNING);
         return;
     }
+    if (isRunning) return;
+
     isRunning = true;
     isPaused  = false;
-    frameTimer->Start(16);
+    stopRequested = false;
     SetStatusText("Running", 1);
-    wxLogMessage("Emulation started");
+
+    emuThread = std::thread(&EmulatorFrame::EmulationThreadFunc, this);
 }
 
 void EmulatorFrame::OnPause(wxCommandEvent& event) {
+    if (!isRunning) return;
+
+    stopRequested = true;
+    if (emuThread.joinable())
+        emuThread.join();
+
     isRunning = false;
     isPaused  = true;
-    frameTimer->Stop();
     SetStatusText("Paused", 1);
     UpdateDebugWindows();
-    wxLogMessage("Emulation paused");
 }
 
 void EmulatorFrame::OnReset(wxCommandEvent& event) {
+    if (isRunning) {
+        stopRequested = true;
+        if (emuThread.joinable())
+            emuThread.join();
+    }
     isRunning = false;
     isPaused  = false;
-    frameTimer->Stop();
 
-    if (biosLoaded && romLoaded) {
-        cpu->InitializeCpuForExecution();
-        accumulator   = 0.0;
-        lastFrameTime = std::chrono::high_resolution_clock::now();
-        SetStatusText("Reset complete - Ready to run", 0);
-        SetStatusText("Stopped", 1);
-        UpdateDebugWindows();
-        wxLogMessage("Emulator reset");
-    }
+    ResetEmulatorState();
+    SetStatusText("Reset complete - Ready to run", 0);
+    SetStatusText("Stopped", 1);
+    UpdateDebugWindows();
+}
+
+void EmulatorFrame::ResetEmulatorState() {
+    if (!biosLoaded)
+        return;
+
+    std::lock_guard<std::mutex> lock(emuMutex);
+    memoryBus->reset();
+    registers->Reset();
+    registers->GetProgramStatusRegister().SetIRQDisable(true);
+    registers->GetProgramStatusRegister().SetFIQDisable(true);
+    registers->GetProgramStatusRegister().SetMode(Supervisor);
+    cpu->InitializeCpuForExecution();
 }
 
 void EmulatorFrame::OnShowRegisters(wxCommandEvent& event) {
-    // Create lazily; window hides itself on close (Veto) rather than destroying,
-    // so we only ever create it once. Check IsShown to avoid creating duplicates
-    // after it's been hidden.
     if (!registerWindow) {
-        registerWindow = new RegisterFrame(this, registers);
+        registerWindow = new RegisterFrame(this, registers, memoryBus, &emuMutex);
     }
     registerWindow->Show();
     registerWindow->Raise();
@@ -298,55 +403,233 @@ void EmulatorFrame::OnShowRegisters(wxCommandEvent& event) {
 
 void EmulatorFrame::OnShowMemory(wxCommandEvent& event) {
     if (!memoryWindow) {
-        memoryWindow = new MemoryViewerFrame(this, memoryBus);
+        memoryWindow = new MemoryViewerFrame(this, memoryBus, &emuMutex);
     }
     memoryWindow->Show();
     memoryWindow->Raise();
 }
 
-void EmulatorFrame::OnTimer(wxTimerEvent& event) {
-    if (!isRunning || !cpu) return;
+void EmulatorFrame::OnToggleTrace(wxCommandEvent& event) {
+    if (!cpu) return;
 
-    auto   currentTime = std::chrono::high_resolution_clock::now();
-    double deltaTime   = std::chrono::duration<double>(currentTime - lastFrameTime).count();
-    lastFrameTime = currentTime;
-
-    // Clamp delta to avoid spiral of death after pauses/debugging
-    if (deltaTime > 0.1) deltaTime = 0.1;
-
-    accumulator += deltaTime;
-
-    while (accumulator >= FRAME_TIME) {
-        for (int i = 0; i < CYCLES_PER_FRAME; i++)
-        {
-            try
-            {
-                cpu->runCpuStep();
-            }
-            catch (const std::exception& e)
-            {
-                isRunning = false;
-                frameTimer->Stop();
-                wxMessageBox(e.what(), "CPU Error", wxICON_ERROR);
-            }
-        }
-        accumulator -= FRAME_TIME;
+    if (cpu->IsTracing()) {
+        std::lock_guard<std::mutex> lock(emuMutex);
+        cpu->DisableTracing();
+        SetStatusText("Trace stopped", 0);
+        return;
     }
 
+    if (isRunning) {
+        wxMessageBox("Pause emulation before starting an instruction trace.", "Not Ready", wxICON_WARNING);
+        return;
+    }
+
+    wxFileDialog dlg(this, "Save Instruction Trace", "", "trace.log",
+                     "Log files (*.log)|*.log|Text files (*.txt)|*.txt|All files (*.*)|*.*",
+                     wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+    if (dlg.ShowModal() == wxID_CANCEL) return;
+
+    bool started;
+    {
+        std::lock_guard<std::mutex> lock(emuMutex);
+        started = cpu->EnableTracing(dlg.GetPath().ToStdString());
+    }
+
+    if (!started) {
+        wxMessageBox("Could not open that file for writing.", "Trace Not Started", wxICON_ERROR);
+        return;
+    }
+
+    SetStatusText("Tracing to " + dlg.GetPath(), 0);
+}
+
+void EmulatorFrame::OnDumpPPUState(wxCommandEvent& event) {
+    if (!memoryBus) return;
+
+    wxString path = wxStandardPaths::Get().GetDocumentsDir() + wxFileName::GetPathSeparator() + "gbaplusplus_ppu_dump.txt";
+    {
+        std::lock_guard<std::mutex> lock(emuMutex);
+        memoryBus->DumpDebugState(path.ToStdString());
+    }
+    SetStatusText("PPU state dumped to " + path, 0);
+}
+
+void EmulatorFrame::OnDumpFrameImage(wxCommandEvent& event) {
+    if (!memoryBus) return;
+
+    wxString path = wxStandardPaths::Get().GetDocumentsDir() + wxFileName::GetPathSeparator() + "gbaplusplus_frame.bmp";
+    {
+        std::lock_guard<std::mutex> lock(emuMutex);
+        memoryBus->SaveFrameAsBMP(path.ToStdString());
+    }
+    SetStatusText("Frame image saved to " + path, 0);
+}
+
+void EmulatorFrame::OnToggleFpsCounter(wxCommandEvent& event) {
+    sdlPanel->SetShowFps(event.IsChecked());
+}
+
+void EmulatorFrame::EmulationThreadFunc() {
+    //different thread, avoid ui lag
+    //windows fucking SUCKS so i have to call ts
+    timeBeginPeriod(1);
+
+    auto lastTime = std::chrono::steady_clock::now();
+    double accumulator = 0.0;
+
+    while (!stopRequested.load(std::memory_order_relaxed)) {
+        auto   currentTime = std::chrono::steady_clock::now();
+        double deltaTime    = std::chrono::duration<double>(currentTime - lastTime).count();
+        lastTime = currentTime;
+
+        //if we dont do this we FUCKING DIE.
+        if (deltaTime > 0.1) deltaTime = 0.1;
+        accumulator += deltaTime;
+
+        bool ranAFrame = false;
+        bool hadError = false;
+        std::string errorMessage;
+
+        while (accumulator >= FRAME_TIME) {
+            auto stepStart = std::chrono::steady_clock::now();
+            {
+                std::lock_guard<std::mutex> lock(emuMutex);
+                //use real cycle cost
+                uint64_t targetCycles = cpu->GetTotalCycles() + CYCLES_PER_FRAME;
+                while (cpu->GetTotalCycles() < targetCycles)
+                {
+                    try
+                    {
+                        cpu->runCpuStep();
+                    }
+                    catch (const std::exception& e)
+                    {
+                        hadError = true;
+                        errorMessage = e.what();
+                        break;
+                    }
+                }
+            }
+            auto stepEnd = std::chrono::steady_clock::now();
+            LogFrameTiming(std::chrono::duration<double>(stepEnd - stepStart).count());
+
+            accumulator -= FRAME_TIME;
+            ranAFrame = true;
+            if (hadError) break;
+
+            //let the mutex like actually fucking work... please
+            std::this_thread::yield();
+        }
+
+        if (hadError) {
+            stopRequested.store(true, std::memory_order_relaxed);
+            wxTheApp->CallAfter([this, errorMessage, alive = aliveFlag]() {
+                if (!alive->load()) return;
+                isRunning = false;
+                isPaused  = true;
+                SetStatusText("Stopped", 1);
+                wxMessageBox(errorMessage, "CPU Error", wxICON_ERROR);
+            });
+            break;
+        }
+
+        if (ranAFrame) {
+            wxTheApp->CallAfter([this, alive = aliveFlag]() {
+                if (!alive->load()) return;
+                OnFrameComplete();
+            });
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    timeEndPeriod(1);
+}
+
+void EmulatorFrame::LogFrameTiming(double stepSeconds) {
+    perfFrameCount++;
+    perfBusyTimeSum += stepSeconds;
+    if (stepSeconds > perfMaxStepSeconds)
+        perfMaxStepSeconds = stepSeconds;
+    if (stepSeconds > FRAME_TIME)
+        perfOverBudgetCount++;
+
+    auto now = std::chrono::steady_clock::now();
+    double windowElapsed = std::chrono::duration<double>(now - perfWindowStart).count();
+    if (windowElapsed < 0.5 || perfFrameCount == 0)
+        return;
+
+    if (perfLog.is_open()) {
+        double budgetMs = FRAME_TIME * 1000.0;
+        double avgMs = (perfBusyTimeSum / static_cast<double>(perfFrameCount)) * 1000.0;
+        double maxMs = perfMaxStepSeconds * 1000.0;
+        double achievedFps = static_cast<double>(perfFrameCount) / windowElapsed;
+
+        perfLog << "frames=" << perfFrameCount
+                << " avg=" << avgMs << "ms (" << (avgMs / budgetMs * 100.0) << "% of " << budgetMs << "ms budget)"
+                << " max=" << maxMs << "ms"
+                << " over_budget=" << perfOverBudgetCount << "/" << perfFrameCount
+                << " ~fps=" << achievedFps
+                << "\n";
+        perfLog.flush();
+    }
+
+    perfFrameCount = 0;
+    perfBusyTimeSum = 0.0;
+    perfMaxStepSeconds = 0.0;
+    perfOverBudgetCount = 0;
+    perfWindowStart = now;
+}
+
+void EmulatorFrame::PollInput() {
+    if (!memoryBus)
+        return;
+
+    Input& input = memoryBus->GetInput();
+
+    //get input from OS rather than wx.... because idk its probably better?
+    if (!IsActive()) {
+        input.ReleaseAll();
+        return;
+    }
+
+    uint16_t mask = 0;
+    for (GbaButton button : InputMap::AllButtons()) {
+        const int keyCode = inputMap.GetKeyFor(button);
+        if (keyCode != InputMap::UNBOUND && wxGetKeyState(static_cast<wxKeyCode>(keyCode)))
+            mask |= static_cast<uint16_t>(1u << static_cast<uint8_t>(button));
+    }
+
+    input.SetPressedMask(mask);
+}
+
+void EmulatorFrame::OnConfigureInput(wxCommandEvent& event) {
+    InputSettingsDialog dialog(this, inputMap);
+    if (dialog.ShowModal() != wxID_OK)
+        return;
+
+    inputMap = dialog.GetResult();
+    inputMap.SaveToConfig();
+    SetStatusText("Input bindings updated", 0);
+}
+
+void EmulatorFrame::OnFrameComplete() {
+    //runs on the UI thread via CallAfter.
+    PollInput();
     sdlPanel->Render();
 
     static int frameCount = 0;
     if (++frameCount >= 10) {
         frameCount = 0;
         UpdateDebugWindows();
-        SetStatusText(wxString::Format("PC: 0x%08X",
-            *registers->GetRegister(PROGRAM_COUNTER)), 1);
-    }
-}
 
-void EmulatorFrame::OnIdle(wxIdleEvent& event) {
-    if (isRunning)
-        event.RequestMore();
+        uint32_t pc;
+        {
+            std::lock_guard<std::mutex> lock(emuMutex);
+            pc = *registers->GetRegister(PROGRAM_COUNTER);
+        }
+        SetStatusText(wxString::Format("PC: 0x%08X", pc), 1);
+    }
 }
 
 void EmulatorFrame::UpdateDebugWindows() {
@@ -362,6 +645,9 @@ SDLPanel::SDLPanel(wxWindow* parent)
     : wxPanel(parent, wxID_ANY)
     , sdlWindow(nullptr)
     , sdlRenderer(nullptr)
+    , gbaTexture(nullptr)
+    , memoryBus(nullptr)
+    , memoryMutex(nullptr)
 {
     SetBackgroundStyle(wxBG_STYLE_PAINT);
     SetBackgroundColour(*wxBLACK);
@@ -378,8 +664,20 @@ SDLPanel::SDLPanel(wxWindow* parent)
 }
 
 SDLPanel::~SDLPanel() {
+    if (fpsTexture)  SDL_DestroyTexture(fpsTexture);
+    if (fpsFont)     TTF_CloseFont(fpsFont);
+    if (gbaTexture)  SDL_DestroyTexture(gbaTexture);
     if (sdlRenderer) SDL_DestroyRenderer(sdlRenderer);
     if (sdlWindow)   SDL_DestroyWindow(sdlWindow);
+}
+
+void SDLPanel::SetShowFps(bool show) {
+    showFps = show;
+}
+
+void SDLPanel::SetSource(MemoryBus* bus, std::mutex* mutex) {
+    memoryBus = bus;
+    memoryMutex = mutex;
 }
 
 void SDLPanel::InitSDL() {
@@ -416,19 +714,108 @@ void SDLPanel::InitSDL() {
         return;
     }
 
-    wxLogMessage("SDL initialized successfully");
+    gbaTexture = SDL_CreateTexture(sdlRenderer, SDL_PIXELFORMAT_ARGB8888,
+        SDL_TEXTUREACCESS_STREAMING, 240, 160);
+    if (!gbaTexture) {
+        wxLogError("Failed to create GBA framebuffer texture: %s", SDL_GetError());
+        return;
+    }
+    SDL_SetTextureScaleMode(gbaTexture, SDL_SCALEMODE_NEAREST);
+
+    const char* basePath = SDL_GetBasePath();
+    wxString fontPath = wxString(basePath ? basePath : "") + "Assets" + wxFileName::GetPathSeparator() + "NotoSans-Regular.ttf";
+    fpsFont = TTF_OpenFont(fontPath.ToStdString().c_str(), 18.0f);
+    if (!fpsFont)
+        wxLogError("Failed to load FPS counter font (%s): %s", fontPath, SDL_GetError());
 }
 
 void SDLPanel::Render() {
-    if (!sdlRenderer) return;
+    if (!sdlRenderer || !gbaTexture) return;
+
+    static uint32_t pixels[240 * 160];
+
+    if (memoryBus && memoryMutex) {
+        std::lock_guard<std::mutex> lock(*memoryMutex);
+        memoryBus->RenderFrame(pixels);
+    }
+
+    SDL_UpdateTexture(gbaTexture, nullptr, pixels, 240 * sizeof(uint32_t));
 
     SDL_SetRenderDrawColor(sdlRenderer, 0, 0, 0, 255);
     SDL_RenderClear(sdlRenderer);
 
-    // TODO: Render GBA screen here
-    SDL_SetRenderDrawColor(sdlRenderer, 50, 50, 100, 255);
-    SDL_FRect rect = {50, 50, 200, 100};
-    SDL_RenderFillRect(sdlRenderer, &rect);
+    //keep the 240:160 aspect ratio, letterboxed to fit the panel
+    int panelWidth, panelHeight;
+    SDL_GetCurrentRenderOutputSize(sdlRenderer, &panelWidth, &panelHeight);
+
+    float scale = std::min(panelWidth / 240.0f, panelHeight / 160.0f);
+    if (scale <= 0.0f) scale = 1.0f;
+
+    SDL_FRect destRect;
+    destRect.w = 240 * scale;
+    destRect.h = 160 * scale;
+    destRect.x = (panelWidth - destRect.w) / 2.0f;
+    destRect.y = (panelHeight - destRect.h) / 2.0f;
+
+    SDL_RenderTexture(sdlRenderer, gbaTexture, nullptr, &destRect);
+
+    //track real wall-clock time between rendered frames, smoothed so the
+    //displayed number doesn't jitter frame to frame
+    auto now = std::chrono::steady_clock::now();
+    if (haveLastRenderTime) {
+        double dt = std::chrono::duration<double>(now - lastRenderTime).count();
+        if (dt > 0.0 && dt < 1.0) {
+            double instantFps = 1.0 / dt;
+            const double smoothing = 0.9;
+            smoothedFps = (smoothedFps <= 0.0) ? instantFps : (smoothedFps * smoothing + instantFps * (1.0 - smoothing));
+        }
+    }
+    lastRenderTime = now;
+    haveLastRenderTime = true;
+
+    if (showFps)
+        RenderFpsCounter(panelWidth);
 
     SDL_RenderPresent(sdlRenderer);
+}
+
+void SDLPanel::RenderFpsCounter(int panelWidth) {
+    if (!fpsFont) return;
+
+    int displayedFps = static_cast<int>(smoothedFps + 0.5);
+
+    if (displayedFps != lastDisplayedFps || !fpsTexture) {
+        lastDisplayedFps = displayedFps;
+
+        char text[32];
+        snprintf(text, sizeof(text), "FPS: %d", displayedFps);
+
+        SDL_Color color{255, 255, 0, 255};
+        SDL_Surface* surface = TTF_RenderText_Blended(fpsFont, text, 0, color);
+        if (!surface) return;
+
+        if (fpsTexture) SDL_DestroyTexture(fpsTexture);
+        fpsTexture = SDL_CreateTextureFromSurface(sdlRenderer, surface);
+        fpsTextureWidth = surface->w;
+        fpsTextureHeight = surface->h;
+        SDL_DestroySurface(surface);
+    }
+
+    if (!fpsTexture) return;
+
+    const float margin = 6.0f;
+    SDL_FRect dest;
+    dest.w = static_cast<float>(fpsTextureWidth);
+    dest.h = static_cast<float>(fpsTextureHeight);
+    dest.x = panelWidth - dest.w - margin;
+    dest.y = margin;
+
+    //dark backing rect so the yellow text stays legible over bright backgrounds
+    SDL_FRect backing = dest;
+    backing.x -= 3.0f; backing.y -= 2.0f; backing.w += 6.0f; backing.h += 4.0f;
+    SDL_SetRenderDrawBlendMode(sdlRenderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(sdlRenderer, 0, 0, 0, 140);
+    SDL_RenderFillRect(sdlRenderer, &backing);
+
+    SDL_RenderTexture(sdlRenderer, fpsTexture, nullptr, &dest);
 }

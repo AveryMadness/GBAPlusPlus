@@ -1,15 +1,17 @@
 ﻿// MemoryViewerFrame.h
 #pragma once
 #include <wx/wx.h>
+#include <mutex>
 #include "../AGB/MemoryBus.h"
 
 class MemoryViewerFrame : public wxFrame {
 public:
-    MemoryViewerFrame(wxWindow* parent, MemoryBus* bus);
+    MemoryViewerFrame(wxWindow* parent, MemoryBus* bus, std::mutex* dataMutex);
     void UpdateDisplay();
 
 private:
     MemoryBus*   memoryBus;
+    std::mutex*  dataMutex;
     wxWindow*    memoryPanel;
     wxTextCtrl*  gotoInput;
     wxFont       monoFont;

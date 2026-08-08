@@ -1,5 +1,8 @@
 ﻿#pragma once
 #include <cstdint>
+#include <fstream>
+#include <memory>
+#include <string>
 
 #include "ARMRegisters.h"
 #include "MemoryBus.h"
@@ -33,7 +36,27 @@ public:
     void executeThumbInstruction(uint16_t instruction);
     void runCpuStep();
 
+    //cycles so far
+    uint64_t GetTotalCycles() const;
+
+    //logs one line per instruction, for diffing against a reference trace
+    bool EnableTracing(const std::string& filePath, size_t maxLines = 10000000);
+    void DisableTracing();
+    bool IsTracing() const;
+
 private:
+    uint64_t totalCycles = 0;
+
+    std::unique_ptr<std::ofstream> traceFile;
+    size_t traceLineCount = 0;
+    size_t traceMaxLines = 0;
+
+    //R0-R12, SP, LR, PC - only changed ones get written each line
+    uint32_t traceLastRegs[16] = {};
+    std::string traceLastFlags;
+    bool traceHasPrevious = false;
+
+    void WriteTraceLine(uint32_t address, bool thumbMode, uint32_t opcode, bool conditionPassed, bool threw);
 
     //helper read and write functions
     uint32_t Read32();
@@ -71,6 +94,12 @@ private:
 
     void flushPipeline();
 
+    bool InterruptPending();
+    void EnterInterrupt();
+    void EnterException(CPUMode mode, uint32_t vectorAddress, uint32_t returnAddress);
+
+    //flushes pipeline on any data-processing write to PC, restoring CPSR from SPSR too if S was set
+    void HandleDataProcessingPCWrite(uint8_t destinationRegister, bool setConditionCodes);
 
     bool IsValueNegative(uint32_t Value);
     bool IsValueZero(uint32_t Value);

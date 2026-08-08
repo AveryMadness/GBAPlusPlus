@@ -63,11 +63,12 @@ wxBEGIN_EVENT_TABLE(MemoryViewerFrame, wxFrame)
     EVT_CLOSE(MemoryViewerFrame::OnClose)
 wxEND_EVENT_TABLE()
 
-MemoryViewerFrame::MemoryViewerFrame(wxWindow* parent, MemoryBus* bus)
+MemoryViewerFrame::MemoryViewerFrame(wxWindow* parent, MemoryBus* bus, std::mutex* dataMutex)
     : wxFrame(parent, wxID_ANY, "Memory Viewer",
               wxDefaultPosition, wxSize(920, 640),
               wxDEFAULT_FRAME_STYLE)
     , memoryBus(bus)
+    , dataMutex(dataMutex)
     , viewOffset(0)
     , bytesPerRow(16)
     , rowHeight(20)
@@ -262,7 +263,11 @@ void MemoryViewerFrame::OnLeftClick(wxMouseEvent& event) {
         selectedAddress = (int64_t)(viewOffset + row * bytesPerRow + col);
         memoryPanel->Refresh();
 
-        uint8_t byte = memoryBus->read8((uint32_t)selectedAddress);
+        uint8_t byte;
+        {
+            std::lock_guard<std::mutex> lock(*dataMutex);
+            byte = memoryBus->read8((uint32_t)selectedAddress);
+        }
         SetStatusText(wxString::Format("0x%08X  =  0x%02X  (%u)  '%c'  [%s]",
             (uint32_t)selectedAddress, byte, byte,
             (byte >= 32 && byte < 127) ? (char)byte : '.',
@@ -273,6 +278,7 @@ void MemoryViewerFrame::OnLeftClick(wxMouseEvent& event) {
 
 void MemoryViewerFrame::OnPaint(wxPaintEvent&) {
     wxPaintDC dc(memoryPanel);
+    std::lock_guard<std::mutex> lock(*dataMutex);
     RenderMemory(dc);
 }
 

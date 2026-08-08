@@ -1,6 +1,12 @@
 ﻿#pragma once
 #include <array>
+#include <string>
 #include <vector>
+
+#include "Flash.h"
+#include "Input.h"
+#include "PPU.h"
+#include "RTC.h"
 
 class MemoryBus
 {
@@ -18,9 +24,34 @@ public:
 
     void loadBIOS(const uint8_t* data, size_t size);
     void loadROM(const uint8_t* data, size_t size);
+    void unloadROM();
 
     void reset();
+
+    void TickPPU();
+    void TickTimers();
+
+    void RenderFrame(uint32_t* pixels);
+
+    void DumpDebugState(const std::string& path);
+
+    void SaveFrameAsBMP(const std::string& path);
+
+    bool IsHalted() const;
+    void ClearHalt();
+
+    Input& GetInput();
+    Flash& GetSaveChip();
+
+    uint32_t ConsumeCycles();
     
+    uint8_t read8Raw(uint32_t address);
+    uint16_t read16Raw(uint32_t address);
+    uint32_t read32Raw(uint32_t address);
+    void write8Raw(uint32_t address, uint8_t value);
+    void write16Raw(uint32_t address, uint16_t value);
+    void write32Raw(uint32_t address, uint32_t value);
+
 private:
     std::array<uint8_t, 256 * 1024> bios;
     std::array<uint8_t, 256 * 1024> ewram;
@@ -30,11 +61,48 @@ private:
     std::array<uint8_t, 96 * 1024> vram;
     std::array<uint8_t, 1024> oam;
     std::vector<uint8_t> rom;
-    std::array<uint8_t, 65536> sram;
 
-    uint32_t lastRead;                            
+    uint32_t lastRead;
     bool biosLocked;
-    
+    bool halted;
+
+    uint32_t pendingCycles = 0;
+    void AddAccessCycles(uint32_t address, uint32_t width);
+
+    struct DmaChannel
+    {
+        uint32_t source = 0;
+        uint32_t destination = 0;
+        uint16_t count = 0;
+        uint16_t control = 0;
+        bool armed = false;
+    };
+    std::array<DmaChannel, 4> dma;
+
+    void OnDmaControlWrite(int channel);
+    void RunDma(int channel);
+    void TriggerDmaChannels(uint8_t startTiming);
+
+    struct TimerChannel
+    {
+        uint16_t reload = 0;
+        uint16_t counter = 0;
+        uint8_t control = 0;
+        uint32_t prescalerCounter = 0;
+        bool running = false;
+    };
+    std::array<TimerChannel, 4> timers;
+
+    void OnTimerControlWrite(int index);
+    void OnTimerReloadWrite(int index);
+
+    void OnSiocntWrite();
+
+    PPU ppu;
+
+    RTC rtc;
+    static bool IsGpioOffset(uint32_t romOffset);
+
     uint8_t readIO(uint32_t offset);
     void writeIO(uint32_t offset, uint8_t value);
     
@@ -42,9 +110,13 @@ private:
     void writeVRAM(uint32_t address, uint8_t value);
     
     uint8_t readROM(uint32_t address);
-    uint8_t readSaveMemory(uint32_t address);
-    void writeSaveMemory(uint32_t address, uint8_t value);
-    
+
+    //FLASH!
+    Flash saveChip;
+
+    //buttons
+    Input input;
+
     uint8_t openBusRead();
 
     inline uint16_t read16Aligned(uint32_t address);

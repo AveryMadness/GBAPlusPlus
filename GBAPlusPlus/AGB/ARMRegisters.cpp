@@ -2,6 +2,21 @@
 
 #include <exception>
 
+void ARMRegisters::Reset()
+{
+    R0 = R1 = R2 = R3 = R4 = R5 = R6 = R7 = R8 = R9 = R10 = R11 = R12 = 0;
+    StackPointer = LinkRegister = ProgramCounter = 0;
+    CPSR = 0;
+
+    R13_irq = R14_irq = SPSR_irq = 0;
+    R8_fiq = R9_fiq = R10_fiq = R11_fiq = R12_fiq = 0;
+    StackPointer_fiq = LinkRegister_fiq = SPSR_fiq = 0;
+    StackPointer_svc = LinkRegister_svc = SPSR_svc = 0;
+    StackPointer_abt = LinkRegister_abt = SPSR_abt = 0;
+    StackPointer_und = LinkRegister_und = SPSR_und = 0;
+    EmptySPSR = 0;
+}
+
 uint32_t* ARMRegisters::GetRegister(uint8_t Register, CPUMode ForcedMode)
 {
     CPUMode mode = GetProgramStatusRegister().GetMode();
