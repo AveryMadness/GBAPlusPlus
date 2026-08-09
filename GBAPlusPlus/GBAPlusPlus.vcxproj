@@ -175,6 +175,7 @@
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="AGB\APU.cpp" />
     <ClCompile Include="AGB\ARM7TDMI.cpp" />
     <ClCompile Include="AGB\ARMRegisters.cpp" />
     <ClCompile Include="AGB\Disassembler.cpp" />
@@ -191,6 +192,7 @@
     <ClCompile Include="UI\RegisterFrame.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="AGB\APU.h" />
     <ClInclude Include="AGB\ARM7TDMI.h" />
     <ClInclude Include="AGB\ARMRegisters.h" />
     <ClInclude Include="AGB\Disassembler.h" />

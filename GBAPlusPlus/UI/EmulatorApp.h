@@ -10,6 +10,7 @@
 #include <fstream>
 #include <memory>
 #include <string>
+#include <vector>
 #include "../AGB/ARM7TDMI.h"
 #include "../AGB/MemoryBus.h"
 #include "../AGB/ARMRegisters.h"
@@ -52,10 +53,28 @@ private:
     void ResetEmulatorState();
     
     void EmulationThreadFunc();
-    
+
+    void InitAudio();
+    void ShutdownAudio();
+    void PumpAudio();
+    void FlushAudio();
+
+    SDL_AudioStream* audioStream = nullptr;
+
+    //one emulated frame is about 549 stereo frames at the apus output rate
+    static constexpr size_t AUDIO_SCRATCH_FRAMES = 4096;
+    std::vector<int16_t> audioScratch;
+
     void OnFrameComplete();
     
     void LogFrameTiming(double stepSeconds);
+    
+    std::atomic<double> emulationFps{0.0};
+    std::chrono::steady_clock::time_point fpsWindowStart;
+    uint64_t fpsFrameCount = 0;
+
+    std::atomic<bool> framePending{false};
+
     std::ofstream perfLog;
     std::chrono::steady_clock::time_point perfWindowStart;
     uint64_t perfFrameCount = 0;
@@ -107,6 +126,7 @@ public:
     void SetSource(MemoryBus* memoryBus, std::mutex* memoryMutex);
 
     void SetShowFps(bool show);
+    void SetFpsSource(const std::atomic<double>* fps);
 
 private:
     void RenderFpsCounter(int panelWidth);
@@ -124,9 +144,7 @@ private:
     int fpsTextureWidth = 0;
     int fpsTextureHeight = 0;
     int lastDisplayedFps = -1;
-    double smoothedFps = 0.0;
-    std::chrono::steady_clock::time_point lastRenderTime;
-    bool haveLastRenderTime = false;
+    const std::atomic<double>* fpsSource = nullptr;
 };
 
 class EmulatorApp : public wxApp {

@@ -56,7 +56,7 @@ bool EmulatorApp::OnInit() {
     SetAppName("GBAPlusPlus");
     SetVendorName("GBAPlusPlus");
 
-    if (!SDL_Init(SDL_INIT_VIDEO)) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
         wxLogError("SDL_Init failed: %s", SDL_GetError());
         return false;
     }
@@ -104,7 +104,7 @@ EmulatorFrame::EmulatorFrame()
     menuBar->Append(fileMenu, "&File");
 
     wxMenu* emuMenu = new wxMenu();
-    emuMenu->Append(ID_Step,  "&Step\tSpace",   "Execute one instruction");
+    emuMenu->Append(ID_Step,  "&Step\tF7",      "Execute one instruction");
     emuMenu->Append(ID_Run,   "&Run\tF5",        "Run emulation");
     emuMenu->Append(ID_Pause, "&Pause\tF6",      "Pause emulation");
     emuMenu->AppendSeparator();
@@ -144,18 +144,7 @@ EmulatorFrame::EmulatorFrame()
     sdlPanel = new SDLPanel(mainPanel);
     sdlPanel->SetMinSize(wxSize(240 * 3, 160 * 3));
     mainSizer->Add(sdlPanel, 1, wxEXPAND | wxALL, 5);
-
-    wxBoxSizer* controlSizer = new wxBoxSizer(wxHORIZONTAL);
-    wxButton* stepBtn  = new wxButton(mainPanel, ID_Step,  "Step");
-    wxButton* runBtn   = new wxButton(mainPanel, ID_Run,   "Run");
-    wxButton* pauseBtn = new wxButton(mainPanel, ID_Pause, "Pause");
-    wxButton* resetBtn = new wxButton(mainPanel, ID_Reset, "Reset");
-    controlSizer->Add(stepBtn,  0, wxALL, 5);
-    controlSizer->Add(runBtn,   0, wxALL, 5);
-    controlSizer->Add(pauseBtn, 0, wxALL, 5);
-    controlSizer->Add(resetBtn, 0, wxALL, 5);
-    mainSizer->Add(controlSizer, 0, wxALIGN_CENTER);
-
+    
     mainPanel->SetSizer(mainSizer);
 
     InitializeEmulator();
@@ -183,6 +172,8 @@ EmulatorFrame::~EmulatorFrame() {
     registerWindow = nullptr;
     memoryWindow   = nullptr;
 
+    ShutdownAudio();
+
     delete cpu;
     delete memoryBus;
     delete registers;
@@ -198,6 +189,9 @@ void EmulatorFrame::InitializeEmulator() {
     cpu = new ARM7TDMI(memoryBus, registers);
 
     sdlPanel->SetSource(memoryBus, &emuMutex);
+    sdlPanel->SetFpsSource(&emulationFps);
+
+    InitAudio();
 
     wxString perfLogPath = wxStandardPaths::Get().GetDocumentsDir()
         + wxFileName::GetPathSeparator() + "gbaplusplus_perf.log";
@@ -303,6 +297,7 @@ void EmulatorFrame::OnUnloadROM(wxCommandEvent& event) {
     wxConfigBase::Get()->DeleteEntry(kRomPathConfigKey);
 
     ResetEmulatorState();
+    FlushAudio();
     SetStatusText("ROM unloaded - running BIOS only", 0);
     SetStatusText("Stopped", 1);
     UpdateDebugWindows();
@@ -347,6 +342,9 @@ void EmulatorFrame::OnRun(wxCommandEvent& event) {
     isRunning = true;
     isPaused  = false;
     stopRequested = false;
+
+    framePending.store(false);
+
     SetStatusText("Running", 1);
 
     emuThread = std::thread(&EmulatorFrame::EmulationThreadFunc, this);
@@ -361,6 +359,7 @@ void EmulatorFrame::OnPause(wxCommandEvent& event) {
 
     isRunning = false;
     isPaused  = true;
+    FlushAudio();
     SetStatusText("Paused", 1);
     UpdateDebugWindows();
 }
@@ -375,6 +374,7 @@ void EmulatorFrame::OnReset(wxCommandEvent& event) {
     isPaused  = false;
 
     ResetEmulatorState();
+    FlushAudio();
     SetStatusText("Reset complete - Ready to run", 0);
     SetStatusText("Stopped", 1);
     UpdateDebugWindows();
@@ -469,6 +469,59 @@ void EmulatorFrame::OnToggleFpsCounter(wxCommandEvent& event) {
     sdlPanel->SetShowFps(event.IsChecked());
 }
 
+void EmulatorFrame::InitAudio() {
+    audioScratch.resize(AUDIO_SCRATCH_FRAMES * 2);
+
+    SDL_AudioSpec spec{};
+    spec.format = SDL_AUDIO_S16;
+    spec.channels = 2;
+    spec.freq = static_cast<int>(APU::OUTPUT_SAMPLE_RATE);
+
+    audioStream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
+    if (!audioStream) {
+        wxLogWarning("Could not open an audio device, running silent: %s", SDL_GetError());
+        return;
+    }
+
+    SDL_ResumeAudioStreamDevice(audioStream);
+}
+
+void EmulatorFrame::ShutdownAudio() {
+    if (!audioStream) return;
+
+    SDL_DestroyAudioStream(audioStream);
+    audioStream = nullptr;
+}
+
+void EmulatorFrame::FlushAudio() {
+    if (!audioStream) return;
+
+    SDL_ClearAudioStream(audioStream);
+
+    if (!memoryBus) return;
+    std::lock_guard<std::mutex> lock(emuMutex);
+    memoryBus->GetAPU().ReadSamples(audioScratch.data(), AUDIO_SCRATCH_FRAMES);
+}
+
+void EmulatorFrame::PumpAudio() {
+    if (!audioStream || !memoryBus) return;
+
+    size_t frames;
+    {
+        std::lock_guard<std::mutex> lock(emuMutex);
+        frames = memoryBus->GetAPU().ReadSamples(audioScratch.data(), AUDIO_SCRATCH_FRAMES);
+    }
+
+    if (frames == 0) return;
+
+    const int maxQueuedBytes = static_cast<int>(APU::OUTPUT_SAMPLE_RATE / 4) * 2 * sizeof(int16_t);
+    if (SDL_GetAudioStreamQueued(audioStream) > maxQueuedBytes)
+        return;
+
+    SDL_PutAudioStreamData(audioStream, audioScratch.data(),
+        static_cast<int>(frames * 2 * sizeof(int16_t)));
+}
+
 void EmulatorFrame::EmulationThreadFunc() {
     //different thread, avoid ui lag
     //windows fucking SUCKS so i have to call ts
@@ -476,6 +529,9 @@ void EmulatorFrame::EmulationThreadFunc() {
 
     auto lastTime = std::chrono::steady_clock::now();
     double accumulator = 0.0;
+
+    fpsWindowStart = std::chrono::steady_clock::now();
+    fpsFrameCount = 0;
 
     while (!stopRequested.load(std::memory_order_relaxed)) {
         auto   currentTime = std::chrono::steady_clock::now();
@@ -513,6 +569,17 @@ void EmulatorFrame::EmulationThreadFunc() {
             auto stepEnd = std::chrono::steady_clock::now();
             LogFrameTiming(std::chrono::duration<double>(stepEnd - stepStart).count());
 
+            PumpAudio();
+
+            fpsFrameCount++;
+            double fpsElapsed = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - fpsWindowStart).count();
+            if (fpsElapsed >= 0.25) {
+                emulationFps.store(fpsFrameCount / fpsElapsed, std::memory_order_relaxed);
+                fpsFrameCount = 0;
+                fpsWindowStart = std::chrono::steady_clock::now();
+            }
+
             accumulator -= FRAME_TIME;
             ranAFrame = true;
             if (hadError) break;
@@ -533,15 +600,20 @@ void EmulatorFrame::EmulationThreadFunc() {
             break;
         }
 
-        if (ranAFrame) {
+        //skip if we dont care yet
+        if (ranAFrame && !framePending.exchange(true)) {
             wxTheApp->CallAfter([this, alive = aliveFlag]() {
                 if (!alive->load()) return;
+                framePending.store(false);
                 OnFrameComplete();
             });
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+
+    //nothing running, dont keep showing
+    emulationFps.store(0.0, std::memory_order_relaxed);
 
     timeEndPeriod(1);
 }
@@ -675,6 +747,10 @@ void SDLPanel::SetShowFps(bool show) {
     showFps = show;
 }
 
+void SDLPanel::SetFpsSource(const std::atomic<double>* fps) {
+    fpsSource = fps;
+}
+
 void SDLPanel::SetSource(MemoryBus* bus, std::mutex* mutex) {
     memoryBus = bus;
     memoryMutex = mutex;
@@ -759,20 +835,6 @@ void SDLPanel::Render() {
 
     SDL_RenderTexture(sdlRenderer, gbaTexture, nullptr, &destRect);
 
-    //track real wall-clock time between rendered frames, smoothed so the
-    //displayed number doesn't jitter frame to frame
-    auto now = std::chrono::steady_clock::now();
-    if (haveLastRenderTime) {
-        double dt = std::chrono::duration<double>(now - lastRenderTime).count();
-        if (dt > 0.0 && dt < 1.0) {
-            double instantFps = 1.0 / dt;
-            const double smoothing = 0.9;
-            smoothedFps = (smoothedFps <= 0.0) ? instantFps : (smoothedFps * smoothing + instantFps * (1.0 - smoothing));
-        }
-    }
-    lastRenderTime = now;
-    haveLastRenderTime = true;
-
     if (showFps)
         RenderFpsCounter(panelWidth);
 
@@ -782,7 +844,8 @@ void SDLPanel::Render() {
 void SDLPanel::RenderFpsCounter(int panelWidth) {
     if (!fpsFont) return;
 
-    int displayedFps = static_cast<int>(smoothedFps + 0.5);
+    double fps = fpsSource ? fpsSource->load(std::memory_order_relaxed) : 0.0;
+    int displayedFps = static_cast<int>(fps + 0.5);
 
     if (displayedFps != lastDisplayedFps || !fpsTexture) {
         lastDisplayedFps = displayedFps;

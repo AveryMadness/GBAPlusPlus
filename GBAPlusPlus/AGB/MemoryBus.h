@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 
+#include "APU.h"
 #include "Flash.h"
 #include "Input.h"
 #include "PPU.h"
@@ -29,7 +30,13 @@ public:
     void reset();
 
     void TickPPU();
-    void TickTimers();
+    
+    uint8_t TickTimers();
+
+    static constexpr uint32_t FIFO_A_ADDRESS = 0x040000A0;
+    static constexpr uint32_t FIFO_B_ADDRESS = 0x040000A4;
+
+    APU& GetAPU();
 
     void RenderFrame(uint32_t* pixels);
 
@@ -82,6 +89,7 @@ private:
     void OnDmaControlWrite(int channel);
     void RunDma(int channel);
     void TriggerDmaChannels(uint8_t startTiming);
+    void TriggerSoundFifoDma(uint32_t fifoAddress);
 
     struct TimerChannel
     {
@@ -99,6 +107,8 @@ private:
     void OnSiocntWrite();
 
     PPU ppu;
+
+    APU apu;
 
     RTC rtc;
     static bool IsGpioOffset(uint32_t romOffset);

@@ -8,6 +8,7 @@ MemoryBus::MemoryBus()
     , biosLocked(false)
     , halted(false)
     , ppu(ioRegisters, vram, paletteRAM, oam)
+    , apu(ioRegisters)
 {
     bios.fill(0);
     reset();
@@ -29,6 +30,7 @@ void MemoryBus::reset()
     dma.fill(DmaChannel{});
     timers.fill(TimerChannel{});
     ppu.Reset();
+    apu.Reset();
     rtc.Reset();
     input.Reset();
 
@@ -63,11 +65,15 @@ void MemoryBus::OnDmaControlWrite(int channel)
     uint16_t control = static_cast<uint16_t>(ioRegisters[cntHOffsets[channel]]
         | (ioRegisters[cntHOffsets[channel] + 1] << 8));
 
-    //enable bit not set, nothing to arm
-    if (!(control & 0x8000))
-        return;
-
     DmaChannel& ch = dma[channel];
+
+    //clearing the enable bit has to disarm, games stop fifo dma this way when swapping buffers
+    if (!(control & 0x8000))
+    {
+        ch.armed = false;
+        return;
+    }
+
     ch.source = *reinterpret_cast<uint32_t*>(&ioRegisters[sadOffsets[channel]]) & 0x0FFFFFFF;
     ch.destination = *reinterpret_cast<uint32_t*>(&ioRegisters[dadOffsets[channel]])
         & (channel == 3 ? 0x0FFFFFFF : 0x07FFFFFF);
@@ -90,11 +96,27 @@ void MemoryBus::TriggerDmaChannels(uint8_t startTiming)
     }
 }
 
+void MemoryBus::TriggerSoundFifoDma(uint32_t fifoAddress)
+{
+    //only channels 1 and 2 can feed a fifo, and only the one aimed at this fifo refills
+    for (int i = 1; i <= 2; i++)
+    {
+        if (!dma[i].armed || ((dma[i].control >> 12) & 0x3) != 3)
+            continue;
+
+        if (dma[i].destination == fifoAddress)
+            RunDma(i);
+    }
+}
+
 void MemoryBus::RunDma(int channel)
 {
     static constexpr uint32_t cntHOffsets[4] = {0xBA, 0xC6, 0xD2, 0xDE};
 
     DmaChannel& ch = dma[channel];
+
+    uint8_t startTiming = (ch.control >> 12) & 0x3;
+    bool fifoMode = (startTiming == 3) && (channel == 1 || channel == 2);
 
     uint32_t count = ch.count;
     if (count == 0)
@@ -103,6 +125,15 @@ void MemoryBus::RunDma(int channel)
     bool wordTransfer = (ch.control & 0x0400) != 0;
     uint8_t destControl = (ch.control >> 5) & 0x3;
     uint8_t srcControl = (ch.control >> 7) & 0x3;
+
+    //fifo dma overrides the register, always four words into a fixed address
+    if (fifoMode)
+    {
+        count = 4;
+        wordTransfer = true;
+        destControl = 2;
+    }
+
     uint32_t step = wordTransfer ? 4 : 2;
 
     uint32_t source = ch.source;
@@ -132,7 +163,6 @@ void MemoryBus::RunDma(int channel)
     }
 
     bool repeat = (ch.control & 0x0200) != 0;
-    uint8_t startTiming = (ch.control >> 12) & 0x3;
 
     if (repeat && startTiming != 0)
     {
@@ -152,15 +182,16 @@ void MemoryBus::RunDma(int channel)
         ioRegisters[0x203] |= static_cast<uint8_t>(1 << channel);
 }
 
-void MemoryBus::TickTimers()
+uint8_t MemoryBus::TickTimers()
 {
     static constexpr uint32_t cntLOffsets[4] = {0x100, 0x104, 0x108, 0x10C};
     static constexpr uint32_t prescalerCycles[4] = {1, 64, 256, 1024};
-    
+
     if (input.ConsumeIrqRequest())
         ioRegisters[0x203] |= static_cast<uint8_t>(1 << 4);
 
     bool previousOverflowed = false;
+    uint8_t overflowMask = 0;
 
     for (int i = 0; i < 4; i++)
     {
@@ -193,6 +224,7 @@ void MemoryBus::TickTimers()
             {
                 timer.counter = timer.reload;
                 overflowed = true;
+                overflowMask |= static_cast<uint8_t>(1 << i);
 
                 if (timer.control & 0x40)
                     ioRegisters[0x202] |= static_cast<uint8_t>(1 << (3 + i));
@@ -209,6 +241,19 @@ void MemoryBus::TickTimers()
 
         previousOverflowed = overflowed;
     }
+    //lets the dma increment
+    APU::RefillRequest refill = apu.Tick(overflowMask);
+    if (refill.fifoA)
+        TriggerSoundFifoDma(FIFO_A_ADDRESS);
+    if (refill.fifoB)
+        TriggerSoundFifoDma(FIFO_B_ADDRESS);
+
+    return overflowMask;
+}
+
+APU& MemoryBus::GetAPU()
+{
+    return apu;
 }
 
 void MemoryBus::OnTimerReloadWrite(int index)
@@ -665,7 +710,22 @@ void MemoryBus::writeIO(uint32_t offset, uint8_t value)
     //VCOUNT
     if (offset == 0x006 || offset == 0x007)
         return;
-    
+
+    //the sound fifos are write only, the bytes go to the queue and never read back
+    if (APU::IsFifoOffset(offset))
+    {
+        apu.WriteFifo(offset, value);
+        return;
+    }
+
+    //SOUNDCNT_X bits 0 to 3 are channel status, only the master enable is writable
+    if (offset == 0x084)
+    {
+        ioRegisters[0x084] = static_cast<uint8_t>((ioRegisters[0x084] & 0x0F) | (value & ~0x0F));
+        apu.OnSoundCntXWrite();
+        return;
+    }
+
     if (offset == 0x202 || offset == 0x203)
     {
         ioRegisters[offset] &= ~value;
@@ -681,7 +741,8 @@ void MemoryBus::writeIO(uint32_t offset, uint8_t value)
 
     ioRegisters[offset] = value;
 
-    if (offset == 0xBB) OnDmaControlWrite(0);
+    if (offset == 0x083) apu.OnSoundCntHWrite();
+    else if (offset == 0xBB) OnDmaControlWrite(0);
     else if (offset == 0xC7) OnDmaControlWrite(1);
     else if (offset == 0xD3) OnDmaControlWrite(2);
     else if (offset == 0xDF) OnDmaControlWrite(3);

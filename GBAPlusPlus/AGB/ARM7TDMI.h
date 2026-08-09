@@ -94,6 +94,7 @@ private:
 
     void flushPipeline();
 
+    bool InterruptWaiting();
     bool InterruptPending();
     void EnterInterrupt();
     void EnterException(CPUMode mode, uint32_t vectorAddress, uint32_t returnAddress);

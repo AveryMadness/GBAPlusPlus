@@ -39,11 +39,13 @@ void ARM7TDMI::runCpuStep()
         memoryBus->TickPPU();
         memoryBus->TickTimers();
         totalCycles++;
-
-        if (InterruptPending())
+        
+        if (InterruptWaiting())
         {
             memoryBus->ClearHalt();
-            EnterInterrupt();
+
+            if (InterruptPending())
+                EnterInterrupt();
         }
         return;
     }
@@ -331,6 +333,10 @@ void ARM7TDMI::buildArmTable()
             {
                 armTable[i] = &ARM7TDMI::armPSRTransfer;
             }
+            else if ((bits27_20 & 0xFB) == 0x32)
+            {
+                armTable[i] = &ARM7TDMI::armPSRTransfer;
+            }
             else
             {
                 armTable[i] = &ARM7TDMI::armDataProcessing;
@@ -576,10 +582,16 @@ void ARM7TDMI::flushPipeline()
     }
 }
 
-bool ARM7TDMI::InterruptPending()
+bool ARM7TDMI::InterruptWaiting()
 {
     uint16_t ie = memoryBus->read16Raw(0x04000200);
     uint16_t irqFlags = memoryBus->read16Raw(0x04000202);
+
+    return (ie & irqFlags) != 0;
+}
+
+bool ARM7TDMI::InterruptPending()
+{
     uint8_t ime = memoryBus->read8Raw(0x04000208);
 
     if (!(ime & 0x1))
@@ -587,7 +599,7 @@ bool ARM7TDMI::InterruptPending()
     if (registers->GetProgramStatusRegister().GetIRQDisable())
         return false;
 
-    return (ie & irqFlags) != 0;
+    return InterruptWaiting();
 }
 
 void ARM7TDMI::EnterException(CPUMode mode, uint32_t vectorAddress, uint32_t returnAddress)
@@ -719,7 +731,7 @@ uint32_t ARM7TDMI::ApplyShift(uint32_t value, uint8_t shiftType, uint8_t shiftAm
 
 uint32_t ARM7TDMI::CalculateRotatedOperand(uint32_t instruction, bool& outCarry)
 {
-    uint8_t imm = instruction & 0xFF;
+    uint32_t imm = instruction & 0xFF;
     uint8_t rotate = (instruction >> 8) & 0xF;
 
     uint32_t shiftAmount = rotate * 2;
@@ -727,12 +739,10 @@ uint32_t ARM7TDMI::CalculateRotatedOperand(uint32_t instruction, bool& outCarry)
     if (shiftAmount == 0)
     {
         outCarry = false;
+        return imm;
     }
-    else
-    {
-        outCarry = (imm >> (shiftAmount - 1)) & 1;
-    }
-        
+
+    outCarry = (imm >> (shiftAmount - 1)) & 1;
     return (imm >> shiftAmount) | (imm << (32 - shiftAmount));
 }
 
@@ -1083,7 +1093,28 @@ void ARM7TDMI::armMultiplyLong(uint32_t instruction)
 
 void ARM7TDMI::armSingleDataSwap(uint32_t instruction)
 {
-    throw std::runtime_error("ARM instruction SWP not implemented.");
+    bool isByte = (instruction >> 22) & 0x1;
+
+    uint8_t BaseRegister = (instruction >> 16) & 0xF;
+    uint8_t DestinationRegister = (instruction >> 12) & 0xF;
+    uint8_t SourceRegister = instruction & 0xF;
+
+    uint32_t address = *registers->GetRegister(BaseRegister);
+    uint32_t sourceValue = *registers->GetRegister(SourceRegister);
+
+    uint32_t loaded;
+    if (isByte)
+    {
+        loaded = memoryBus->read8(address);
+        memoryBus->write8(address, static_cast<uint8_t>(sourceValue));
+    }
+    else
+    {
+        loaded = LoadWord(address);
+        StoreWord(address, sourceValue);
+    }
+
+    *registers->GetRegister(DestinationRegister) = loaded;
 }
 
 void ARM7TDMI::armBranchExchange(uint32_t instruction)
@@ -1418,55 +1449,59 @@ void ARM7TDMI::armUndefined(uint32_t instruction)
 
 void ARM7TDMI::armPSRTransfer(uint32_t instruction)
 {
-    uint8_t signature = (instruction >> 16) & 0x3F;
+    //bit 22 picks SPSR over CPSR, bit 21 picks MSR over MRS
+    bool IsSavedRegister = (instruction >> 22) & 0x1;
+    bool IsMsr = (instruction >> 21) & 0x1;
 
-
-    if (signature == 0b001111)
+    if (!IsMsr)
     {
-        //MRS - read CPSR/SPSR into register
-        bool IsSavedRegister = (instruction >> 22) & 0x1;
+        //MRS - read CPSR/SPSR into a register
         uint32_t Value = IsSavedRegister ? registers->GetSavedProgramStatusRegister().GetValue()
             : registers->GetProgramStatusRegister().GetValue();
 
         uint8_t registerValue = (instruction >> 12) & 0xF;
         *registers->GetRegister(registerValue) = Value;
+        return;
+    }
+
+    //MSR
+    uint32_t Operand2;
+    if ((instruction >> 25) & 0x1)
+    {
+        bool notNeeded = false;
+        Operand2 = CalculateRotatedOperand(instruction, notNeeded);
     }
     else
     {
-        //MSR - read register into CPSR
-        bool IsImmediate = (instruction >> 25) & 0x1;
-        uint8_t fieldMask = (instruction >> 16) & 0xF;
-
-        bool flagsOnly = (fieldMask == 0xF) || ((instruction >> 22) & 1);
-
-        //only transfer flags
-        uint32_t Operand2 = 0;
-        if (flagsOnly)
-        {
-            if (IsImmediate)
-            {
-                bool notNeeded = false;
-                Operand2 = CalculateRotatedOperand(instruction, notNeeded);
-            }
-            else
-            {
-                //is register
-                uint8_t registerValue = instruction & 0xF;
-                Operand2 = *registers->GetRegister(registerValue);
-            }
-
-            registers->GetProgramStatusRegister().SetFlags(Operand2);
-        }
-        else
-        {
-            //is always register, cant be immediate
-            uint8_t registerValue = instruction & 0xF;
-            Operand2 = *registers->GetRegister(registerValue);
-
-            if (fieldMask & 0x1) registers->GetProgramStatusRegister().SetControl(Operand2);
-            if (fieldMask & 0x8) registers->GetProgramStatusRegister().SetFlags(Operand2);
-        }
+        //read the source in the current mode, before any mode change lands
+        Operand2 = *registers->GetRegister(instruction & 0xF);
     }
+
+    //one field mask bit per byte of the register, low to high: c x s f
+    static constexpr uint32_t fieldBytes[4] = {0x000000FF, 0x0000FF00, 0x00FF0000, 0xFF000000};
+    uint8_t fieldMask = (instruction >> 16) & 0xF;
+
+    uint32_t writeMask = 0;
+    for (int i = 0; i < 4; i++)
+    {
+        if (fieldMask & (1 << i))
+            writeMask |= fieldBytes[i];
+    }
+
+    if (IsSavedRegister)
+    {
+        ProgramStatusRegister spsr = registers->GetSavedProgramStatusRegister();
+        spsr.SetValue((spsr.GetValue() & ~writeMask) | (Operand2 & writeMask));
+        return;
+    }
+
+    if (registers->GetProgramStatusRegister().GetMode() == User)
+        writeMask &= 0xFF000000;
+    
+    writeMask &= ~(1u << 5);
+
+    ProgramStatusRegister cpsr = registers->GetProgramStatusRegister();
+    cpsr.SetValue((cpsr.GetValue() & ~writeMask) | (Operand2 & writeMask));
 }
 
 void ARM7TDMI::thumbMoveShiftedRegister(uint16_t instruction)
